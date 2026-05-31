@@ -1,0 +1,27 @@
+{
+  "id": "youtube",
+  "name": "YouTube",
+  "version": "1.0.0",
+  "author": "Viboplr",
+  "description": "Play and download tracks from YouTube via yt-dlp",
+  "minAppVersion": "0.9.4",
+  "homepage": "https://github.com/outcast1000/viboplr-youtube",
+  "updateUrl": "https://github.com/outcast1000/viboplr-youtube/releases/latest/download/update.json",
+  "binaryDependencies": [
+    { "name": "yt-dlp", "required": true, "reason": "Download audio streams from YouTube" },
+    { "name": "ffmpeg", "required": false, "reason": "Convert downloaded audio to preferred format" }
+  ],
+  "contributes": {
+    "streamResolvers": [
+      { "id": "youtube-fallback", "name": "YouTube" }
+    ],
+    "downloadProviders": [
+      { "id": "youtube-download", "name": "YouTube" }
+    ],
+    "settingsPanel": {
+      "id": "youtube-settings",
+      "label": "YouTube",
+      "order": 50
+    }
+  }
+}
