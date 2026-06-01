@@ -1,7 +1,7 @@
 {
   "id": "youtube",
   "name": "YouTube",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "author": "Viboplr",
   "description": "Play and download tracks from YouTube via yt-dlp",
   "minAppVersion": "0.9.4",
