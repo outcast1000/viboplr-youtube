@@ -183,6 +183,27 @@ logs folder from the app's settings ("open logs folder") or on disk. Use
 
 ---
 
+## 5a. Running the tests
+
+This repo ships a zero-dependency test suite that loads the real `index.js` in a
+faithful sandbox (`new Function(...)` with the host's globals) and drives it
+through a mocked `api` bridge — no real `yt-dlp`/`ffmpeg`, no network, no disk.
+
+```bash
+node --test        # or: npm test
+```
+
+Tests live under `test/`; the loader and mock bridge are in `test/harness/`. CI
+runs the same command on every push/PR, and a release will not publish unless the
+suite passes. The tests assert search parsing, duration matching, cache eviction,
+format-conversion decisions, and the ffmpeg-missing download path.
+
+These tests encode our understanding of the host `api` contract. They are not a
+substitute for a real in-app smoke test before a release — symlink the plugin into
+the host app and play/download a track to confirm against real binaries.
+
+---
+
 ## 6. Cleaning up (`deactivate`)
 
 Every reload runs `deactivate()` (if present) before re-activating. Most `api`

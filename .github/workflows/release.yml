@@ -29,6 +29,16 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Run tests (gate release)
+        run: |
+          node --check index.js
+          node --test
+
       - name: Resolve version
         id: ver
         run: |

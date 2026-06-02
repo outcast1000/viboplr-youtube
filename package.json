@@ -1,0 +1,8 @@
+{
+  "private": true,
+  "name": "viboplr-youtube-tests",
+  "description": "Test harness for the viboplr-youtube plugin (not published; the plugin itself is just index.js + manifest.json).",
+  "scripts": {
+    "test": "node --test"
+  }
+}
