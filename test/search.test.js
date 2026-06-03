@@ -91,3 +91,55 @@ test("empty search output resolves to null", async () => {
   const res = await streamResolve(api, "Song", "Artist", null);
   assert.equal(res, null);
 });
+
+// --- Logging / diagnostics added for SABR/403 troubleshooting ----------------
+
+function logsMatching(api, re) {
+  return api.calls.log.filter((l) => re.test(l.msg));
+}
+
+test("search logs the exact yt-dlp command it runs", async () => {
+  const api = apiWithSearch("ggggggggggg\t213\tThe Song\n");
+  await streamResolve(api, "The Song", "Artist", null);
+  const runLogs = logsMatching(api, /^Running: yt-dlp .*ytsearch7:/);
+  assert.equal(runLogs.length, 1, "search command must be logged once");
+});
+
+test("download failure logs stderr and runs the verbose diagnostics probe", async () => {
+  const api = makeApi({
+    storage: { kv: { cacheMaxMb: 100 } },
+    exec: [
+      { match: { cmd: "yt-dlp", argsInclude: ["--version"] }, result: { exitCode: 0, stdout: "2025.01.01\n" } },
+      { match: { cmd: "ffmpeg", argsInclude: ["-version"] }, result: { exitCode: 1 } },
+      { match: { cmd: "yt-dlp", argsInclude: ["ytsearch"] }, result: { exitCode: 0, stdout: "ggggggggggg\t213\tThe Song\n" } },
+      // The real download fails with a 403 like YouTube's SABR experiment produces.
+      { match: { cmd: "yt-dlp", argsInclude: ["bestaudio", "--no-simulate"] },
+        result: { exitCode: 1, stderr: "ERROR: unable to download video data: HTTP Error 403: Forbidden" } },
+      // The diagnostics re-run (-v --simulate) surfaces the underlying reason.
+      { match: { cmd: "yt-dlp", argsInclude: ["-v", "--simulate"] },
+        result: { exitCode: 0, stderr: "[debug] [youtube] [pot] PO Token Providers: none\n[debug] YouTube is forcing SABR streaming for this client" } },
+    ],
+  });
+  const res = await streamResolve(api, "The Song", "Artist", 213);
+  assert.equal(res, null, "a 403 download yields no playable source");
+
+  // The raw failure is logged...
+  assert.ok(logsMatching(api, /403: Forbidden/).length >= 1, "the 403 stderr must be logged");
+  // ...the verbose diagnostics probe is actually invoked...
+  assert.ok(api.calls.exec.some((c) => c.cmd === "yt-dlp" && c.args.includes("-v") && c.args.includes("--simulate")),
+    "diagnostics probe (-v --simulate) must run on failure");
+  // ...and its actionable output (PO token / SABR) reaches the log.
+  assert.ok(logsMatching(api, /diagnostics/i).length >= 1, "diagnostics summary must be logged");
+  assert.ok(logsMatching(api, /PO Token|SABR/i).length >= 1, "diagnostics must surface the PO-token/SABR cause");
+});
+
+test("duration fallback (no candidate within 3s) is logged as a warning", async () => {
+  const stdout = [
+    "aaaaaaaaaaa\t600\tLive Version",   // far from 213
+    "bbbbbbbbbbb\t400\tAlso far",       // far from 213
+  ].join("\n") + "\n";
+  const api = apiWithSearch(stdout);
+  await streamResolve(api, "Song", "Artist", 213);
+  const warns = api.calls.log.filter((l) => l.level === "warn" && /none within ±3s/.test(l.msg));
+  assert.equal(warns.length, 1, "first-result fallback must warn about the duration mismatch");
+});

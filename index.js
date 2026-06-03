@@ -96,6 +96,43 @@ function watchUrl(videoId) {
   return "https://www.youtube.com/watch?v=" + videoId;
 }
 
+// Render an exec argv as a copy-pasteable command line for logging. Quotes args
+// containing whitespace so the logged line can be re-run verbatim from a shell.
+function formatCmd(program, args) {
+  var parts = [program];
+  for (var i = 0; i < args.length; i++) {
+    var a = String(args[i]);
+    parts.push(/\s/.test(a) ? '"' + a + '"' : a);
+  }
+  return parts.join(" ");
+}
+
+// When a yt-dlp download fails, re-run extraction in verbose simulate mode to
+// surface *why* — PO-token availability, the SABR/GVS streaming experiment, and
+// skipped formats are emitted at extraction time, so `-v --simulate` reveals them
+// without re-downloading any media. Best-effort: logs whatever it captures and
+// never throws. See https://github.com/yt-dlp/yt-dlp/issues/12482 for SABR/403s.
+async function logDownloadDiagnostics(api, url) {
+  try {
+    var diag = await api.system.exec("yt-dlp", [
+      "-v", "--simulate", "-f", "bestaudio", url
+    ], { cwd: null });
+    var out = ((diag.stderr || "") + "\n" + (diag.stdout || "")).trim();
+    // Keep only the lines that explain failures; the full -v dump is mostly noise.
+    var keep = [];
+    var lines = out.split("\n");
+    for (var i = 0; i < lines.length; i++) {
+      if (/po.?token|sabr|gvs|skipped|missing a URL|forcing|403|forbidden|player_client|experiment/i.test(lines[i])) {
+        keep.push(lines[i].trim());
+      }
+    }
+    var summary = keep.length ? keep.join("\n") : out;
+    if (summary) api.log("warn", "yt-dlp diagnostics:\n" + summary, "youtube");
+  } catch (e) {
+    api.log("warn", "yt-dlp diagnostics probe failed: " + (e && e.message ? e.message : e), "youtube");
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Search via yt-dlp itself (maintained against YouTube's changes) rather than
 // scraping the results HTML. Returns { videoId, title } or null.
@@ -103,19 +140,22 @@ function watchUrl(videoId) {
 async function searchYoutube(api, title, artistName, durationSecs) {
   var query = artistName ? title + " " + artistName : title;
   var res;
+  var searchArgs = [
+    "ytsearch7:" + query,
+    "--flat-playlist",
+    "--no-warnings",
+    "--print", "%(id)s\t%(duration)s\t%(title)s"
+  ];
+  api.log("info", "Running: " + formatCmd("yt-dlp", searchArgs), "youtube");
   try {
-    res = await api.system.exec("yt-dlp", [
-      "ytsearch7:" + query,
-      "--flat-playlist",
-      "--no-warnings",
-      "--print", "%(id)s\t%(duration)s\t%(title)s"
-    ]);
+    res = await api.system.exec("yt-dlp", searchArgs);
   } catch (e) {
     api.log("warn", "yt-dlp search exec failed: " + (e && e.message ? e.message : e), "youtube");
     return null;
   }
   if (res.exitCode !== 0 || !res.stdout) {
-    api.log("warn", "yt-dlp search returned no results (exit " + res.exitCode + ")", "youtube");
+    api.log("warn", "yt-dlp search returned no results (exit " + res.exitCode + ")" +
+      (res.stderr ? ": " + res.stderr.trim() : ""), "youtube");
     return null;
   }
 
@@ -135,16 +175,30 @@ async function searchYoutube(api, title, artistName, durationSecs) {
       durationSecs: isNaN(dur) ? null : dur
     });
   }
-  if (candidates.length === 0) return null;
+  if (candidates.length === 0) {
+    api.log("warn", "yt-dlp search parsed 0 valid candidates from output", "youtube");
+    return null;
+  }
 
   var best = candidates[0];
+  var matchedByDuration = false;
   if (durationSecs != null && durationSecs > 0) {
     for (var c = 0; c < candidates.length; c++) {
       if (candidates[c].durationSecs !== null && Math.abs(candidates[c].durationSecs - durationSecs) <= 3) {
         best = candidates[c];
+        matchedByDuration = true;
         break;
       }
     }
+  }
+  // Surface how the match was chosen — a first-result fallback (no duration within
+  // ±3s of the requested track) is the usual cause of a wrong-song match.
+  if (durationSecs != null && durationSecs > 0 && !matchedByDuration) {
+    api.log("warn", candidates.length + " candidate(s); none within ±3s of " + durationSecs +
+      "s — falling back to top result (" + (best.durationSecs != null ? best.durationSecs + "s" : "unknown duration") + ")", "youtube");
+  } else {
+    api.log("info", candidates.length + " candidate(s); chose " + best.videoId +
+      (matchedByDuration ? " (duration match)" : " (top result)"), "youtube");
   }
   return { videoId: best.videoId, title: best.title };
 }
@@ -324,7 +378,7 @@ async function searchAndDownload(api, title, artistName, durationSecs) {
   try {
     var cacheDir = await api.storage.files.getPath(["cache"]);
     var outputTemplate = videoId + ".%(ext)s";
-    var dlResult = await api.system.exec("yt-dlp", [
+    var dlArgs = [
       "-f", "bestaudio",
       "--no-warnings",
       "--quiet",
@@ -333,9 +387,12 @@ async function searchAndDownload(api, title, artistName, durationSecs) {
       "-P", cacheDir,
       "-o", outputTemplate,
       url
-    ], { cwd: null });
+    ];
+    api.log("info", "Running: " + formatCmd("yt-dlp", dlArgs), "youtube");
+    var dlResult = await api.system.exec("yt-dlp", dlArgs, { cwd: null });
     if (dlResult.exitCode !== 0) {
       api.log("error", "yt-dlp failed (exit " + dlResult.exitCode + "): " + (dlResult.stderr || "").trim(), "youtube");
+      await logDownloadDiagnostics(api, url);
       return null;
     }
     filePath = dlResult.stdout ? dlResult.stdout.trim() || null : null;
@@ -344,7 +401,8 @@ async function searchAndDownload(api, title, artistName, durationSecs) {
     return null;
   }
   if (!filePath) {
-    api.log("warn", "yt-dlp returned no file path", "youtube");
+    api.log("warn", "yt-dlp returned no file path (exit 0 but no output) — likely a SABR/PO-token issue", "youtube");
+    await logDownloadDiagnostics(api, url);
     return null;
   }
 

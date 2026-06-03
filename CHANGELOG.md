@@ -1,5 +1,14 @@
 # Changelog
 
+## v1.0.2
+- Richer download logging for troubleshooting playback failures: the exact
+  `yt-dlp` search/download command is now logged, the chosen candidate reports
+  whether it was a duration match or a top-result fallback (with a warning when no
+  candidate is within ±3s of the requested track), and on a failed download the
+  plugin re-runs extraction in verbose simulate mode (`-v --simulate`) to surface
+  the underlying cause — PO-token availability and the SABR/GVS streaming
+  experiment that drives YouTube's HTTP 403s.
+
 ## v1.0.1
 - Search now runs through `yt-dlp` (`ytsearch:`) instead of scraping the results
   HTML, so it no longer breaks when YouTube changes its page markup.
