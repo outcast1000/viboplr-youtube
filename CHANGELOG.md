@@ -1,5 +1,8 @@
 # Changelog
 
+## v1.1.1
+- Search results now show each video's thumbnail.
+
 ## v1.1.0
 - Add a **YouTube search** sidebar view: search YouTube, then select results and
   Play or Download them from a toolbar. Play and Download target the exact selected

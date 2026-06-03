@@ -77,6 +77,7 @@ test("submit renders a track-row-list of ALL candidates", async () => {
   assert.equal(list.items.length, 2, "shows all candidates");
   assert.equal(list.items[0].title, "Never Gonna Give You Up");
   assert.equal(list.items[0].subtitle, "Rick Astley");
+  assert.equal(list.items[0].imageUrl, "https://i.ytimg.com/vi/dQw4w9WgXcQ/mqdefault.jpg");
 });
 
 test("submit with no candidates shows 'No results' and clears the loading state", async () => {

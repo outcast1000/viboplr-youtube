@@ -150,6 +150,13 @@ function watchUrl(videoId) {
   return "https://www.youtube.com/watch?v=" + videoId;
 }
 
+// Deterministic thumbnail URL for a video id (no API call). mqdefault (320x180)
+// is reliably present for any public video. Loaded directly by the WebView's
+// <img> tag, so it needs no network proxy.
+function thumbnailUrl(videoId) {
+  return "https://i.ytimg.com/vi/" + videoId + "/mqdefault.jpg";
+}
+
 // Parse a youtube://<videoId> URI. Returns the 11-char id or null.
 // VIDEO_ID_RE ensures the id is exactly 11 chars [A-Za-z0-9_-], preventing
 // injection/traversal when the id is later passed to yt-dlp or used in file paths.
@@ -899,7 +906,8 @@ function renderSearchView(api) {
         id: c.videoId,
         title: parsed.title || c.title || c.videoId,
         subtitle: parsed.artist || c.channel || "",
-        duration: formatDuration(c.durationSecs)
+        duration: formatDuration(c.durationSecs),
+        imageUrl: thumbnailUrl(c.videoId)
       });
     }
     children.push({
