@@ -33,12 +33,26 @@ async function downloadResolve(api, fmt) {
   return api._handlers["meta:youtube-download"]("The Song", "Artist", "Album", 213, fmt);
 }
 
+test("download prefers an m4a stream, falling back to bestaudio", async () => {
+  // m4a/AAC plays in every webview (incl. macOS WKWebView); Opus-in-WebM does
+  // not classify cleanly as audio. Prefer m4a when YouTube offers it, fall back
+  // to bestaudio otherwise.
+  const api = downloadApi({ ffmpeg: false }); // no conversion → format selector is what matters
+  await downloadResolve(api, "aac");
+  const dl = api.calls.exec.find((c) => c.cmd === "yt-dlp" && c.args.includes("-o"));
+  const fIdx = dl.args.indexOf("-f");
+  assert.notEqual(fIdx, -1, "download must pass an -f format selector");
+  assert.equal(dl.args[fIdx + 1], "bestaudio[ext=m4a]/bestaudio");
+});
+
 test("ffmpeg present: aac download transcodes and returns the temp file", async () => {
   const api = downloadApi({ ffmpeg: true });
   const res = await downloadResolve(api, "aac");
   assert.match(res.url, /^file:\/\/\/mock-plugin-data\/temp\/ggggggggggg\.\d+\.m4a$/);
   // ffmpeg was actually invoked to convert
   assert.ok(api.calls.exec.some((c) => c.cmd === "ffmpeg" && c.args.includes("-c:a")));
+  // The converted file is a real .m4a; tell the host to save it as such.
+  assert.equal(res.ext, "m4a");
 });
 
 test("ffmpeg missing: serves the original source and never spawns ffmpeg", async () => {
@@ -50,12 +64,17 @@ test("ffmpeg missing: serves the original source and never spawns ffmpeg", async
   assert.ok(!api.calls.exec.some((c) => c.cmd === "ffmpeg" && c.args.includes("-c:a")), "ffmpeg must not be spawned to convert");
   // metadata reflects the request, but the file is the honest original (.webm)
   assert.equal(res.metadata.title, "The Song");
+  // Served the source untouched → host must save it with the real container
+  // extension, not the requested aac/.m4a (which would mislabel a .webm file).
+  assert.equal(res.ext, "webm");
 });
 
 test("ffmpeg conversion failure falls back to the source file", async () => {
   const api = downloadApi({ ffmpeg: true, ffmpegConvertExit: 1 });
   const res = await downloadResolve(api, "aac");
   assert.equal(res.url, "file:///mock-plugin-data/cache/ggggggggggg.webm");
+  // Fell back to the untouched source → save with its true extension.
+  assert.equal(res.ext, "webm");
   // Distinguish this from the ffmpeg-missing case: conversion must have been
   // ATTEMPTED (and failed), not skipped — otherwise both reach the same URL.
   assert.ok(api.calls.exec.some((c) => c.cmd === "ffmpeg" && c.args.includes("-c:a")),

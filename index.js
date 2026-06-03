@@ -379,7 +379,10 @@ async function searchAndDownload(api, title, artistName, durationSecs) {
     var cacheDir = await api.storage.files.getPath(["cache"]);
     var outputTemplate = videoId + ".%(ext)s";
     var dlArgs = [
-      "-f", "bestaudio",
+      // Prefer the m4a/AAC audio stream (plays in every webview, incl. macOS
+      // WKWebView) and fall back to the best available audio (often Opus/WebM)
+      // only when YouTube offers no m4a stream.
+      "-f", "bestaudio[ext=m4a]/bestaudio",
       "--no-warnings",
       "--quiet",
       "--no-simulate",
@@ -528,10 +531,18 @@ async function activate(api) {
           }
         }
 
+        // Tell the host the real container of the file we're serving so it names
+        // the saved file honestly. finalPath is either the converted temp file
+        // (target ext) or the untouched source (e.g. .webm) when conversion was
+        // skipped/unavailable/failed — without this the host would name a served
+        // .webm by the requested format (aac -> .m4a) and mislabel it.
+        var finalExt = (finalPath.match(/\.([^.]+)$/) || [])[1];
+
         api.log("info", "Download resolve -> " + finalPath, "youtube");
         return {
           url: "file://" + finalPath,
           headers: null,
+          ext: finalExt || undefined,
           metadata: {
             title: title,
             artist: artistName || undefined,

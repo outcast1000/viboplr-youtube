@@ -1,5 +1,14 @@
 # Changelog
 
+## v1.0.3
+- Downloads now prefer YouTube's m4a/AAC audio stream
+  (`bestaudio[ext=m4a]/bestaudio`), falling back to the best available audio only
+  when no m4a stream exists. m4a plays in every webview (including macOS
+  WKWebView), avoiding Opus-in-WebM files that don't classify cleanly as audio.
+- The download resolver now reports the served file's true container extension to
+  the host, so saved files are named honestly (e.g. a source served without
+  conversion is saved as `.webm`, not mislabeled as the requested `.m4a`).
+
 ## v1.0.2
 - Richer download logging for troubleshooting playback failures: the exact
   `yt-dlp` search/download command is now logged, the chosen candidate reports
