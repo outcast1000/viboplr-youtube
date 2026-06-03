@@ -1,0 +1,225 @@
+const { test } = require("node:test");
+const assert = require("node:assert/strict");
+const { loadPlugin } = require("./harness/sandbox.js");
+const { makeApi } = require("./harness/mock-api.js");
+
+function baseApi(extra) {
+  return makeApi(Object.assign({
+    storage: { kv: { cacheMaxMb: 100 } },
+    exec: [
+      { match: { cmd: "yt-dlp", argsInclude: ["--version"] }, result: { exitCode: 0, stdout: "2025.01.01\n" } },
+      { match: { cmd: "ffmpeg", argsInclude: ["-version"] }, result: { exitCode: 0, stdout: "ffmpeg version 6.1\n" } },
+    ],
+  }, extra || {}));
+}
+
+// Pull the last setViewData payload for a given view id.
+function lastView(api, id) {
+  const calls = api.calls.setViewData.filter((c) => c.id === id);
+  return calls.length ? calls[calls.length - 1].data : null;
+}
+
+// Recursively find the first node of a given type in a PluginViewData tree.
+function findNode(node, type) {
+  if (!node || typeof node !== "object") return null;
+  if (node.type === type) return node;
+  const kids = node.children || node.items || [];
+  for (const k of kids) {
+    const hit = findNode(k, type);
+    if (hit) return hit;
+  }
+  return null;
+}
+
+test("renders a search-input on activate", async () => {
+  const api = baseApi();
+  const plugin = loadPlugin();
+  await plugin.activate(api);
+  const view = lastView(api, "youtube-search");
+  assert.ok(view, "youtube-search view was set");
+  assert.ok(findNode(view, "search-input"), "has a search-input");
+});
+
+test("formatDuration formats edge cases correctly", () => {
+  const fmt = loadPlugin()._formatDuration;
+  assert.equal(fmt(0), "0:00");
+  assert.equal(fmt(59), "0:59");
+  assert.equal(fmt(60), "1:00");
+  assert.equal(fmt(213), "3:33");
+  assert.equal(fmt(3599), "59:59");
+  assert.equal(fmt(3600), "1:00:00");
+  assert.equal(fmt(3661), "1:01:01");
+  assert.equal(fmt(59.9), "0:59");
+  assert.equal(fmt(null), "");
+  assert.equal(fmt(NaN), "");
+  assert.equal(fmt(-5), "");
+});
+
+test("submit renders a track-row-list of ALL candidates", async () => {
+  const stdout = [
+    "dQw4w9WgXcQ\t213\tRickAstleyVEVO\tRick Astley - Never Gonna Give You Up",
+    "abcdefghijk\t180\tSomeChannel\tSome Other Song",
+  ].join("\n") + "\n";
+  const api = baseApi({
+    exec: [
+      { match: { cmd: "yt-dlp", argsInclude: ["--version"] }, result: { exitCode: 0, stdout: "2025.01.01\n" } },
+      { match: { cmd: "ffmpeg", argsInclude: ["-version"] }, result: { exitCode: 0, stdout: "ffmpeg version 6.1\n" } },
+      { match: { cmd: "yt-dlp", argsInclude: ["ytsearch"] }, result: { exitCode: 0, stdout: stdout } },
+    ],
+  });
+  const plugin = loadPlugin();
+  await plugin.activate(api);
+  await api._handlers["action:youtube-search-submit"]({ query: "never gonna give you up" });
+  const view = lastView(api, "youtube-search");
+  const list = findNode(view, "track-row-list");
+  assert.ok(list, "rendered a track-row-list");
+  assert.equal(list.selectable, true, "list is selectable");
+  assert.equal(list.items.length, 2, "shows all candidates");
+  assert.equal(list.items[0].title, "Never Gonna Give You Up");
+  assert.equal(list.items[0].subtitle, "Rick Astley");
+});
+
+test("submit with no candidates shows 'No results' and clears the loading state", async () => {
+  const api = baseApi({
+    exec: [
+      { match: { cmd: "yt-dlp", argsInclude: ["--version"] }, result: { exitCode: 0, stdout: "2025.01.01\n" } },
+      { match: { cmd: "ffmpeg", argsInclude: ["-version"] }, result: { exitCode: 0, stdout: "ffmpeg version 6.1\n" } },
+      { match: { cmd: "yt-dlp", argsInclude: ["ytsearch"] }, result: { exitCode: 1, stderr: "no results" } },
+    ],
+  });
+  const plugin = loadPlugin();
+  await plugin.activate(api);
+  await api._handlers["action:youtube-search-submit"]({ query: "asdfqwerzxcv" });
+  const view = lastView(api, "youtube-search");
+  assert.ok(!findNode(view, "loading"), "loading state cleared");
+  assert.ok(!findNode(view, "track-row-list"), "no results list");
+  const text = findNode(view, "text");
+  assert.ok(text && text.content === "No results.", "shows 'No results.'");
+});
+
+function searchApi() {
+  return baseApi({
+    exec: [
+      { match: { cmd: "yt-dlp", argsInclude: ["--version"] }, result: { exitCode: 0, stdout: "2025.01.01\n" } },
+      { match: { cmd: "ffmpeg", argsInclude: ["-version"] }, result: { exitCode: 0, stdout: "ffmpeg version 6.1\n" } },
+      { match: { cmd: "yt-dlp", argsInclude: ["ytsearch"] }, result: { exitCode: 0,
+        stdout: [
+          "dQw4w9WgXcQ\t213\tRickAstleyVEVO\tRick Astley - Never Gonna Give You Up",
+          "abcdefghijk\t180\tSomeChannel\tArtist Two - Song Two",
+        ].join("\n") + "\n" } },
+    ],
+  });
+}
+
+test("youtube-play builds youtube:// PluginTracks and calls playTracks", async () => {
+  const api = searchApi();
+  const plugin = loadPlugin();
+  await plugin.activate(api);
+  await api._handlers["action:youtube-search-submit"]({ query: "rick astley" });
+  await api._handlers["action:youtube-play"]({ selectedIds: ["dQw4w9WgXcQ", "abcdefghijk"] });
+  assert.equal(api.calls.playTrack.length, 1, "playTracks recorded once");
+  const rec = api.calls.playTrack[0];
+  assert.equal(rec.startIndex, 0);
+  assert.equal(rec.tracks.length, 2, "both selected tracks included");
+  const t = rec.tracks[0];
+  assert.equal(t.path, "youtube://dQw4w9WgXcQ");
+  assert.equal(t.title, "Never Gonna Give You Up");
+  assert.equal(t.artist_name, "Rick Astley");
+  assert.equal(t.duration_secs, 213);
+  const t2 = rec.tracks[1];
+  assert.equal(t2.path, "youtube://abcdefghijk");
+  assert.equal(t2.title, "Song Two");
+  assert.equal(t2.artist_name, "Artist Two");
+});
+
+test("youtube-download enqueues once per selected id with the youtube:// uri", async () => {
+  const api = searchApi();
+  const plugin = loadPlugin();
+  await plugin.activate(api);
+  await api._handlers["action:youtube-search-submit"]({ query: "rick astley" });
+  await api._handlers["action:youtube-download"]({ selectedIds: ["dQw4w9WgXcQ", "abcdefghijk"] });
+  assert.equal(api.calls.enqueue.length, 2);
+  const req = api.calls.enqueue[0];
+  assert.equal(req.uri, "youtube://dQw4w9WgXcQ");
+  assert.equal(req.provider, "youtube-download");
+  assert.equal(req.title, "Never Gonna Give You Up");
+  assert.equal(req.artistName, "Rick Astley");
+});
+
+test("actions ignore empty / unknown selections without throwing", async () => {
+  const api = searchApi();
+  const plugin = loadPlugin();
+  await plugin.activate(api);
+  await api._handlers["action:youtube-search-submit"]({ query: "rick astley" });
+  await api._handlers["action:youtube-play"]({ selectedIds: [] });
+  await api._handlers["action:youtube-download"]({ selectedIds: ["zzzzzzzzzzz"] });
+  assert.equal(api.calls.playTrack.length, 0);
+  assert.equal(api.calls.enqueue.length, 0);
+});
+
+function resolverApi() {
+  return makeApi({
+    storage: { kv: { cacheMaxMb: 100 } },
+    exec: [
+      { match: { cmd: "yt-dlp", argsInclude: ["--version"] }, result: { exitCode: 0, stdout: "2025.01.01\n" } },
+      { match: { cmd: "ffmpeg", argsInclude: ["-version"] }, result: { exitCode: 0, stdout: "ffmpeg version 6.1\n" } },
+      { match: { cmd: "yt-dlp", argsInclude: ["bestaudio"] }, result: (cmd, args) => {
+          const oIdx = args.indexOf("-o");
+          const id = args[oIdx + 1].replace(/\..*$/, "");
+          return { exitCode: 0, stdout: "/mock-plugin-data/cache/" + id + ".webm\n" };
+        } },
+      { match: { cmd: "ffmpeg", argsInclude: ["-c:a"] }, result: { exitCode: 0, stdout: "" } },
+    ],
+  });
+}
+
+test("stream URI resolver downloads the exact id WITHOUT searching", async () => {
+  const api = resolverApi();
+  const plugin = loadPlugin();
+  await plugin.activate(api);
+  const url = await api._handlers["streamuri:youtube"]("dQw4w9WgXcQ");
+  assert.equal(url, "file:///mock-plugin-data/cache/dQw4w9WgXcQ.webm");
+  const searched = api.calls.exec.some((e) => e.args.join(" ").includes("ytsearch"));
+  assert.equal(searched, false, "must not search — resolves by exact id");
+});
+
+test("download URI resolver resolves the exact id and returns a file url", async () => {
+  const api = resolverApi();
+  const plugin = loadPlugin();
+  await plugin.activate(api);
+  const res = await api._handlers["uri:youtube-download"]("youtube://dQw4w9WgXcQ", "aac");
+  assert.ok(res && res.url && res.url.startsWith("file://"), "returns a file url");
+  const searched = api.calls.exec.some((e) => e.args.join(" ").includes("ytsearch"));
+  assert.equal(searched, false, "must not search — resolves by exact id");
+});
+
+test("download URI resolver returns null for a malformed uri", async () => {
+  const api = resolverApi();
+  const plugin = loadPlugin();
+  await plugin.activate(api);
+  const res = await api._handlers["uri:youtube-download"]("youtube://not-a-valid-id!!", "aac");
+  assert.equal(res, null);
+});
+
+test("stream URI resolver returns null for an invalid video id", async () => {
+  const api = resolverApi();
+  const plugin = loadPlugin();
+  await plugin.activate(api);
+  const url = await api._handlers["streamuri:youtube"]("not-valid!!");
+  assert.equal(url, null);
+  const searched = api.calls.exec.some((e) => e.args.join(" ").includes("ytsearch"));
+  assert.equal(searched, false);
+});
+
+test("URI resolvers return null when yt-dlp is unavailable", async () => {
+  const api = makeApi({
+    storage: { kv: { cacheMaxMb: 100 } },
+    exec: [
+      { match: { cmd: "yt-dlp", argsInclude: ["--version"] }, result: { exitCode: 1, stderr: "not found" } },
+    ],
+  });
+  const plugin = loadPlugin();
+  await plugin.activate(api);
+  assert.equal(await api._handlers["streamuri:youtube"]("dQw4w9WgXcQ"), null);
+  assert.equal(await api._handlers["uri:youtube-download"]("youtube://dQw4w9WgXcQ", "aac"), null);
+});

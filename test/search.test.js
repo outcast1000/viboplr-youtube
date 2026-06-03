@@ -30,8 +30,8 @@ async function streamResolve(api, title, artist, dur) {
 
 test("parses ytsearch --print lines into candidates and resolves the first by default", async () => {
   const stdout = [
-    "dQw4w9WgXcQ\t213\tRick Astley - Never Gonna Give You Up",
-    "abcdefghijk\t180\tSome Other Song",
+    "dQw4w9WgXcQ\t213\tRickAstleyVEVO\tRick Astley - Never Gonna Give You Up",
+    "abcdefghijk\t180\tch\tSome Other Song",
   ].join("\n") + "\n";
   const api = apiWithSearch(stdout);
   const res = await streamResolve(api, "Never Gonna Give You Up", "Rick Astley", null);
@@ -41,8 +41,8 @@ test("parses ytsearch --print lines into candidates and resolves the first by de
 
 test("duration match within 3s picks the matching candidate, not the first", async () => {
   const stdout = [
-    "aaaaaaaaaaa\t600\tLive Version",     // far from target
-    "bbbbbbbbbbb\t214\tStudio Version",   // within 3s of 213
+    "aaaaaaaaaaa\t600\tch\tLive Version",     // far from target
+    "bbbbbbbbbbb\t214\tch\tStudio Version",   // within 3s of 213
   ].join("\n") + "\n";
   const api = apiWithSearch(stdout);
   const res = await streamResolve(api, "Song", "Artist", 213);
@@ -51,8 +51,8 @@ test("duration match within 3s picks the matching candidate, not the first", asy
 
 test("duration of 0 falls back to the first candidate", async () => {
   const stdout = [
-    "aaaaaaaaaaa\t600\tFirst",
-    "bbbbbbbbbbb\t214\tSecond",
+    "aaaaaaaaaaa\t600\tch\tFirst",
+    "bbbbbbbbbbb\t214\tch\tSecond",
   ].join("\n") + "\n";
   const api = apiWithSearch(stdout);
   const res = await streamResolve(api, "Song", "Artist", 0);
@@ -60,7 +60,7 @@ test("duration of 0 falls back to the first candidate", async () => {
 });
 
 test("tab characters in the title do not corrupt id/duration parsing", async () => {
-  const stdout = "ccccccccccc\t200\tTitle\twith\ttabs\n";
+  const stdout = "ccccccccccc\t200\tch\tTitle\twith\ttabs\n";
   const api = apiWithSearch(stdout);
   const res = await streamResolve(api, "Song", "Artist", null);
   assert.equal(res.sourceUrl, "https://www.youtube.com/watch?v=ccccccccccc");
@@ -68,8 +68,8 @@ test("tab characters in the title do not corrupt id/duration parsing", async () 
 
 test("duration 'NA' is treated as unknown and does not match", async () => {
   const stdout = [
-    "ddddddddddd\tNA\tUnknown Length",
-    "eeeeeeeeeee\t213\tExact Match",
+    "ddddddddddd\tNA\tch\tUnknown Length",
+    "eeeeeeeeeee\t213\tch\tExact Match",
   ].join("\n") + "\n";
   const api = apiWithSearch(stdout);
   const res = await streamResolve(api, "Song", "Artist", 213);
@@ -78,8 +78,8 @@ test("duration 'NA' is treated as unknown and does not match", async () => {
 
 test("lines whose id is not a valid 11-char video id are skipped", async () => {
   const stdout = [
-    "short\t213\tBad Id",
-    "fffffffffff\t213\tGood Id",
+    "short\t213\tch\tBad Id",
+    "fffffffffff\t213\tch\tGood Id",
   ].join("\n") + "\n";
   const api = apiWithSearch(stdout);
   const res = await streamResolve(api, "Song", "Artist", null);
@@ -99,7 +99,7 @@ function logsMatching(api, re) {
 }
 
 test("search logs the exact yt-dlp command it runs", async () => {
-  const api = apiWithSearch("ggggggggggg\t213\tThe Song\n");
+  const api = apiWithSearch("ggggggggggg\t213\tch\tThe Song\n");
   await streamResolve(api, "The Song", "Artist", null);
   const runLogs = logsMatching(api, /^Running: yt-dlp .*ytsearch7:/);
   assert.equal(runLogs.length, 1, "search command must be logged once");
@@ -111,7 +111,7 @@ test("download failure logs stderr and runs the verbose diagnostics probe", asyn
     exec: [
       { match: { cmd: "yt-dlp", argsInclude: ["--version"] }, result: { exitCode: 0, stdout: "2025.01.01\n" } },
       { match: { cmd: "ffmpeg", argsInclude: ["-version"] }, result: { exitCode: 1 } },
-      { match: { cmd: "yt-dlp", argsInclude: ["ytsearch"] }, result: { exitCode: 0, stdout: "ggggggggggg\t213\tThe Song\n" } },
+      { match: { cmd: "yt-dlp", argsInclude: ["ytsearch"] }, result: { exitCode: 0, stdout: "ggggggggggg\t213\tch\tThe Song\n" } },
       // The real download fails with a 403 like YouTube's SABR experiment produces.
       { match: { cmd: "yt-dlp", argsInclude: ["bestaudio", "--no-simulate"] },
         result: { exitCode: 1, stderr: "ERROR: unable to download video data: HTTP Error 403: Forbidden" } },
@@ -135,8 +135,8 @@ test("download failure logs stderr and runs the verbose diagnostics probe", asyn
 
 test("duration fallback (no candidate within 3s) is logged as a warning", async () => {
   const stdout = [
-    "aaaaaaaaaaa\t600\tLive Version",   // far from 213
-    "bbbbbbbbbbb\t400\tAlso far",       // far from 213
+    "aaaaaaaaaaa\t600\tch\tLive Version",   // far from 213
+    "bbbbbbbbbbb\t400\tch\tAlso far",       // far from 213
   ].join("\n") + "\n";
   const api = apiWithSearch(stdout);
   await streamResolve(api, "Song", "Artist", 213);

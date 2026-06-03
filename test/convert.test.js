@@ -10,7 +10,7 @@ function convertApi(probeStderr) {
     exec: [
       { match: { cmd: "yt-dlp", argsInclude: ["--version"] }, result: { exitCode: 0, stdout: "2025.01.01\n" } },
       { match: { cmd: "ffmpeg", argsInclude: ["-version"] }, result: { exitCode: 0, stdout: "ffmpeg version 6.1\n" } },
-      { match: { cmd: "yt-dlp", argsInclude: ["ytsearch"] }, result: { exitCode: 0, stdout: "jjjjjjjjjjj\t213\tSong\n" } },
+      { match: { cmd: "yt-dlp", argsInclude: ["ytsearch"] }, result: { exitCode: 0, stdout: "jjjjjjjjjjj\t213\tCh\tSong\n" } },
       { match: { cmd: "yt-dlp", argsInclude: ["bestaudio"] }, result: (cmd, args) => {
           const id = args[args.indexOf("-o") + 1].replace(/\..*$/, "");
           return { exitCode: 0, stdout: "/mock-plugin-data/cache/" + id + ".webm\n" };

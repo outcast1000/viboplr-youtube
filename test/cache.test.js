@@ -118,7 +118,7 @@ test("the just-resolved track (lastSourceFile) survives eviction even at limit 0
       { match: { cmd: "yt-dlp", argsInclude: ["--version"] }, result: { exitCode: 0, stdout: "2025.01.01\n" } },
       { match: { cmd: "ffmpeg", argsInclude: ["-version"] }, result: { exitCode: 0, stdout: "ffmpeg version 6.1\n" } },
       // search resolves to ID_A, which is already in cache → cache hit, no download
-      { match: { cmd: "yt-dlp", argsInclude: ["ytsearch"] }, result: { exitCode: 0, stdout: ID_A + "\t213\tSong\n" } },
+      { match: { cmd: "yt-dlp", argsInclude: ["ytsearch"] }, result: { exitCode: 0, stdout: ID_A + "\t213\tCh\tSong\n" } },
     ],
   });
   await activate(api);

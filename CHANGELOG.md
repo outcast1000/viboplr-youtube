@@ -1,5 +1,14 @@
 # Changelog
 
+## v1.1.0
+- Add a **YouTube search** sidebar view: search YouTube, then select results and
+  Play or Download them from a toolbar. Play and Download target the exact selected
+  video (via `youtube://<id>`), not a fuzzy metadata re-search.
+- Best-effort `Artist - Song` parsing of result titles for cleaner display (strips
+  promo/quality tags like "(Official Video)", keeps `feat.`/`(Remix)`/`(Live)`).
+- Internal: shared `runYtSearch`/`downloadById`/`convertForFormat` helpers now back
+  both the fuzzy fallback paths and the new exact-id paths.
+
 ## v1.0.3
 - Downloads now prefer YouTube's m4a/AAC audio stream
   (`bestaudio[ext=m4a]/bestaudio`), falling back to the best available audio only

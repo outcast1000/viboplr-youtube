@@ -1,7 +1,7 @@
 {
   "id": "youtube",
   "name": "YouTube",
-  "version": "1.0.3",
+  "version": "1.1.0",
   "author": "Viboplr",
   "description": "Play and download tracks from YouTube via yt-dlp",
   "minAppVersion": "0.9.4",
@@ -20,6 +20,13 @@
     }
   ],
   "contributes": {
+    "sidebarItems": [
+      {
+        "id": "youtube-search",
+        "label": "YouTube",
+        "icon": "search"
+      }
+    ],
     "streamResolvers": [
       {
         "id": "youtube-fallback",

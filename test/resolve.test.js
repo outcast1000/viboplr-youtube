@@ -3,7 +3,7 @@ const assert = require("node:assert/strict");
 const { loadPlugin } = require("./harness/sandbox.js");
 const { makeApi } = require("./harness/mock-api.js");
 
-const SEARCH = "ggggggggggg\t213\tThe Song\n";
+const SEARCH = "ggggggggggg\t213\tCh\tThe Song\n";
 
 function downloadApi({ ffmpeg = true, ffmpegConvertExit = 0 } = {}) {
   const rules = [
@@ -101,8 +101,8 @@ test("download by metadata uses duration to pick the right candidate", async () 
   // Two candidates; only the second matches 213s. The download path must forward
   // durationSecs so the chosen id (and thus downloaded file) is the match.
   const stdout = [
-    "hhhhhhhhhhh\t600\tLong Version",
-    "iiiiiiiiiii\t213\tStudio",
+    "hhhhhhhhhhh\t600\tCh\tLong Version",
+    "iiiiiiiiiii\t213\tCh\tStudio",
   ].join("\n") + "\n";
   const api = makeApi({
     storage: { kv: { cacheMaxMb: 100 } },

@@ -4,6 +4,9 @@ var latestYtDlp = null;
 var latestFfmpeg = null;
 var checking = false;
 var cacheMaxMb = 100;
+var searchQuery = "";
+var searchResults = null; // array of candidates, or null before first search
+var searching = false;
 
 // Filenames currently being produced/consumed by an in-flight resolve. cleanupCache
 // never evicts these, so a parallel download cannot delete another's just-written file.
@@ -23,6 +26,47 @@ function stripRemasterSuffix(s) {
   return s.replace(REMASTER_SUFFIX, "").trim() || s;
 }
 
+// Trailing noise tags to strip from a YouTube video title before display.
+// Removes parenthetical/bracketed tags containing promo/quality keywords.
+// Tags with only semantic content — (Remix)/(Live)/feat. — typically survive
+// because they don't match these patterns, not via explicit exclusion.
+var TITLE_NOISE = [
+  /\s*[\(\[][^\)\]]*official[^\)\]]*[\)\]]\s*$/i,   // (Official Music Video), [Official Audio]
+  /\s*[\(\[][^\)\]]*lyric[^\)\]]*[\)\]]\s*$/i,       // (Lyrics), (Lyric Video)
+  /\s*[\(\[][^\)\]]*(audio|visualizer|hd|hq|4k)[^\)\]]*[\)\]]\s*$/i,
+  /\s*-\s*(official video|official audio|hd|hq|4k)\s*$/i,
+  /\s+(hd|hq|4k)\s*$/i
+];
+
+function cleanTitle(s) {
+  if (!s) return s;
+  var prev;
+  do {
+    prev = s;
+    for (var i = 0; i < TITLE_NOISE.length; i++) s = s.replace(TITLE_NOISE[i], "");
+    s = stripRemasterSuffix(s);
+    s = s.trim();
+  } while (s !== prev);
+  return s;
+}
+
+// Best-effort "Artist - Song" extraction. Returns { artist, title }.
+// Splits on the FIRST of " - " / en-dash / em-dash; falls back to the channel
+// name as artist when there is no usable separator.
+function parseTrackTitle(rawTitle, channel) {
+  var cleaned = cleanTitle(rawTitle) || rawTitle || "";
+  var seps = [" - ", " – ", " — "];
+  for (var i = 0; i < seps.length; i++) {
+    var idx = cleaned.indexOf(seps[i]);
+    if (idx > 0) {
+      var left = cleaned.substring(0, idx).trim();
+      var right = cleaned.substring(idx + seps[i].length).trim();
+      if (left && right) return { artist: left, title: right };
+    }
+  }
+  return { artist: channel || "", title: cleaned };
+}
+
 var YTDLP_INSTALL_URL = "https://github.com/yt-dlp/yt-dlp#installation";
 var FFMPEG_INSTALL_URL = "https://ffmpeg.org/download.html";
 
@@ -35,6 +79,16 @@ function basename(p) {
 function stemOf(name) {
   var dot = name.lastIndexOf(".");
   return dot > 0 ? name.substring(0, dot) : name;
+}
+// Seconds -> "m:ss" / "h:mm:ss" for display. Returns "" for null/NaN/negative.
+function formatDuration(secs) {
+  if (secs == null || isNaN(secs) || secs < 0) return "";
+  var s = Math.floor(secs % 60);
+  var m = Math.floor((secs / 60) % 60);
+  var h = Math.floor(secs / 3600);
+  var mm = (h > 0 && m < 10 ? "0" : "") + m;
+  var ss = (s < 10 ? "0" : "") + s;
+  return (h > 0 ? h + ":" : "") + mm + ":" + ss;
 }
 
 // ---------------------------------------------------------------------------
@@ -96,6 +150,15 @@ function watchUrl(videoId) {
   return "https://www.youtube.com/watch?v=" + videoId;
 }
 
+// Parse a youtube://<videoId> URI. Returns the 11-char id or null.
+// VIDEO_ID_RE ensures the id is exactly 11 chars [A-Za-z0-9_-], preventing
+// injection/traversal when the id is later passed to yt-dlp or used in file paths.
+function parseYoutubeUri(uri) {
+  if (!uri || uri.indexOf("youtube://") !== 0) return null;
+  var id = uri.substring("youtube://".length);
+  return VIDEO_ID_RE.test(id) ? id : null;
+}
+
 // Render an exec argv as a copy-pasteable command line for logging. Quotes args
 // containing whitespace so the logged line can be re-run verbatim from a shell.
 function formatCmd(program, args) {
@@ -135,30 +198,32 @@ async function logDownloadDiagnostics(api, url) {
 
 // ---------------------------------------------------------------------------
 // Search via yt-dlp itself (maintained against YouTube's changes) rather than
-// scraping the results HTML. Returns { videoId, title } or null.
+// scraping the results HTML.
 // ---------------------------------------------------------------------------
-async function searchYoutube(api, title, artistName, durationSecs) {
-  var query = artistName ? title + " " + artistName : title;
-  var res;
+
+// Low-level: run `yt-dlp ytsearch` and return ALL parsed candidates:
+// [{ videoId, title, channel, durationSecs }]. Returns [] on failure.
+async function runYtSearch(api, query, count) {
+  var n = count || 7;
   var searchArgs = [
-    "ytsearch7:" + query,
+    "ytsearch" + n + ":" + query,
     "--flat-playlist",
     "--no-warnings",
-    "--print", "%(id)s\t%(duration)s\t%(title)s"
+    "--print", "%(id)s\t%(duration)s\t%(channel)s\t%(title)s"
   ];
   api.log("info", "Running: " + formatCmd("yt-dlp", searchArgs), "youtube");
+  var res;
   try {
     res = await api.system.exec("yt-dlp", searchArgs);
   } catch (e) {
     api.log("warn", "yt-dlp search exec failed: " + (e && e.message ? e.message : e), "youtube");
-    return null;
+    return [];
   }
   if (res.exitCode !== 0 || !res.stdout) {
     api.log("warn", "yt-dlp search returned no results (exit " + res.exitCode + ")" +
       (res.stderr ? ": " + res.stderr.trim() : ""), "youtube");
-    return null;
+    return [];
   }
-
   var lines = res.stdout.split("\n");
   var candidates = [];
   for (var i = 0; i < lines.length; i++) {
@@ -169,17 +234,25 @@ async function searchYoutube(api, title, artistName, durationSecs) {
     if (!videoId || !VIDEO_ID_RE.test(videoId)) continue;
     var durRaw = cols[1];
     var dur = durRaw && durRaw !== "NA" ? parseInt(durRaw, 10) : NaN;
+    var channel = cols[2] && cols[2] !== "NA" ? cols[2] : "";
     candidates.push({
       videoId: videoId,
-      title: cols.slice(2).join("\t") || null,
+      title: cols.slice(3).join("\t") || null,
+      channel: channel,
       durationSecs: isNaN(dur) ? null : dur
     });
   }
-  if (candidates.length === 0) {
-    api.log("warn", "yt-dlp search parsed 0 valid candidates from output", "youtube");
+  return candidates;
+}
+
+// Pick the best candidate for a known target duration (fallback resolver path):
+// first within ±3s of durationSecs, else the top result. Returns
+// { videoId, title } or null. Behavior preserved from the old searchYoutube.
+function pickBestCandidate(candidates, durationSecs, api) {
+  if (!candidates || candidates.length === 0) {
+    if (api) api.log("warn", "yt-dlp search parsed 0 valid candidates from output", "youtube");
     return null;
   }
-
   var best = candidates[0];
   var matchedByDuration = false;
   if (durationSecs != null && durationSecs > 0) {
@@ -191,16 +264,23 @@ async function searchYoutube(api, title, artistName, durationSecs) {
       }
     }
   }
-  // Surface how the match was chosen — a first-result fallback (no duration within
-  // ±3s of the requested track) is the usual cause of a wrong-song match.
-  if (durationSecs != null && durationSecs > 0 && !matchedByDuration) {
-    api.log("warn", candidates.length + " candidate(s); none within ±3s of " + durationSecs +
-      "s — falling back to top result (" + (best.durationSecs != null ? best.durationSecs + "s" : "unknown duration") + ")", "youtube");
-  } else {
-    api.log("info", candidates.length + " candidate(s); chose " + best.videoId +
-      (matchedByDuration ? " (duration match)" : " (top result)"), "youtube");
+  if (api) {
+    if (durationSecs != null && durationSecs > 0 && !matchedByDuration) {
+      api.log("warn", candidates.length + " candidate(s); none within ±3s of " + durationSecs +
+        "s — falling back to top result (" + (best.durationSecs != null ? best.durationSecs + "s" : "unknown duration") + ")", "youtube");
+    } else {
+      api.log("info", candidates.length + " candidate(s); chose " + best.videoId +
+        (matchedByDuration ? " (duration match)" : " (top result)"), "youtube");
+    }
   }
   return { videoId: best.videoId, title: best.title };
+}
+
+// Back-compat wrapper used by the fallback download/stream paths.
+async function searchYoutube(api, title, artistName, durationSecs) {
+  var query = artistName ? title + " " + artistName : title;
+  var candidates = await runYtSearch(api, query);
+  return pickBestCandidate(candidates, durationSecs, api);
 }
 
 // Probe an audio file via `ffmpeg -i`. Returns { codec, bitrateKbps } or null.
@@ -348,31 +428,15 @@ function scheduleCleanup(api, wipeTemp) {
   return cleanupChain;
 }
 
-// Search YouTube and ensure a source audio file exists on disk for the match.
+// Ensure a source audio file exists on disk for an exact video id.
 // Returns { filePath, videoId, videoTitle, youtubeUrl } or null.
-async function searchAndDownload(api, title, artistName, durationSecs) {
-  api.log("info", "Searching YouTube for: " + title + (artistName ? " — " + artistName : ""), "youtube");
-  var result;
-  try {
-    result = await searchYoutube(api, title, artistName, durationSecs);
-  } catch (e) {
-    api.log("error", "YouTube search failed: " + (e && e.message ? e.message : e), "youtube");
-    return null;
-  }
-  if (!result || !result.videoId) {
-    api.log("warn", "YouTube search returned no result for: " + title, "youtube");
-    return null;
-  }
-  var videoId = result.videoId;
+async function downloadById(api, videoId, videoTitle) {
   var url = watchUrl(videoId);
-  api.log("info", "Matched " + (result.title || "(untitled)") + " — " + url, "youtube");
-
   var cached = await findCachedDownload(api, videoId);
   if (cached) {
     api.log("info", "Using cached download: " + cached, "youtube");
-    return { filePath: cached, videoId: videoId, videoTitle: result.title, youtubeUrl: url };
+    return { filePath: cached, videoId: videoId, videoTitle: videoTitle || null, youtubeUrl: url };
   }
-
   api.log("info", "Downloading audio via yt-dlp: " + url, "youtube");
   var filePath;
   try {
@@ -408,9 +472,26 @@ async function searchAndDownload(api, title, artistName, durationSecs) {
     await logDownloadDiagnostics(api, url);
     return null;
   }
-
   api.log("info", "Downloaded to: " + filePath, "youtube");
-  return { filePath: filePath, videoId: videoId, videoTitle: result.title, youtubeUrl: url };
+  return { filePath: filePath, videoId: videoId, videoTitle: videoTitle || null, youtubeUrl: url };
+}
+
+// Search YouTube by metadata, then ensure the matched video is on disk.
+async function searchAndDownload(api, title, artistName, durationSecs) {
+  api.log("info", "Searching YouTube for: " + title + (artistName ? " — " + artistName : ""), "youtube");
+  var result;
+  try {
+    result = await searchYoutube(api, title, artistName, durationSecs);
+  } catch (e) {
+    api.log("error", "YouTube search failed: " + (e && e.message ? e.message : e), "youtube");
+    return null;
+  }
+  if (!result || !result.videoId) {
+    api.log("warn", "YouTube search returned no result for: " + title, "youtube");
+    return null;
+  }
+  api.log("info", "Matched " + (result.title || "(untitled)") + " — " + watchUrl(result.videoId), "youtube");
+  return downloadById(api, result.videoId, result.title);
 }
 
 // Wraps searchAndDownload, protecting the produced file from cache eviction for the
@@ -432,6 +513,95 @@ async function resolveSource(api, title, artistName, durationSecs, work) {
       api.log("warn", "Cache cleanup failed: " + (e && e.message ? e.message : e), "youtube");
     });
   }
+}
+
+// Like resolveSource but the source is produced by `produce()` (e.g. downloadById
+// for an exact id) instead of searchAndDownload. `work` is optional — when omitted
+// the src object itself is returned (used by the stream URI resolver).
+async function resolveSourceWith(api, produce, work) {
+  var src = await produce();
+  if (!src) return null;
+  var name = basename(src.filePath);
+  inFlightFiles[name] = (inFlightFiles[name] || 0) + 1;
+  try {
+    return work ? await work(src) : src;
+  } finally {
+    lastSourceFile = name;
+    inFlightFiles[name]--;
+    if (inFlightFiles[name] <= 0) delete inFlightFiles[name];
+    scheduleCleanup(api).catch(function (e) {
+      api.log("warn", "Cache cleanup failed: " + (e && e.message ? e.message : e), "youtube");
+    });
+  }
+}
+
+// Given a downloaded source file, produce the final file in the requested
+// format (remux/transcode as needed) and return the host download-resolve
+// result { url, headers, ext, metadata }. Shared by the metadata and URI
+// download resolvers.
+async function convertForFormat(api, src, format, title, artistName, albumName) {
+  var srcPath = src.filePath;
+  var fmt = format || "aac";
+  var spec = FORMATS[fmt];
+  api.log("info", "Preparing " + title + " as " + fmt, "youtube");
+
+  var finalPath = srcPath;
+  var srcExt = (srcPath.match(/\.([^.]+)$/) || [])[1];
+
+  if (!spec) {
+    api.log("warn", "Unknown target format: " + fmt + " — using source as-is", "youtube");
+  } else if (!ffmpegVersion) {
+    // ffmpeg is optional; without it we cannot convert. Serve the original download
+    // (with its true extension) rather than mislabeling it as the requested format.
+    api.log("warn", "ffmpeg not available — serving original download (." + (srcExt || "?") + ") without conversion", "youtube");
+  } else {
+    var ext = spec.ext;
+    var probe = await probeAudio(api, srcPath);
+    if (probe) {
+      api.log("info", "Source: " + (probe.codec || "?") + " @ " + (probe.bitrateKbps || "?") + " kb/s", "youtube");
+    } else {
+      api.log("warn", "Could not probe source — falling back to transcode defaults", "youtube");
+    }
+    // destPath in the plugin's temp/ dir (wiped on startup); unique per request to
+    // avoid two concurrent conversions clobbering the same file.
+    var destName = src.videoId + "." + (convSeq++) + "." + ext;
+    var destPath = await api.storage.files.writeText(["temp", destName], "");
+    var conv = buildConvertArgs(srcPath, destPath, fmt, probe);
+    if (!conv) {
+      api.log("warn", "No conversion rule for format: " + fmt + " — using source as-is", "youtube");
+    } else if (conv.mode === "copy" && srcExt === ext) {
+      api.log("info", "Source already in target container — reusing without conversion", "youtube");
+    } else {
+      var label = conv.mode === "copy" ? "Remuxing (codec copy, no re-encode)" :
+        "Transcoding to " + fmt + " @ " + (conv.bitrate ? conv.bitrate + "k" : "default");
+      api.log("info", label + " -> " + destPath, "youtube");
+      var ffResult = await api.system.exec("ffmpeg", conv.args);
+      if (ffResult.exitCode === 0) {
+        finalPath = destPath;
+        api.log("info", "Conversion complete: " + destPath, "youtube");
+      } else {
+        api.log("error", "Conversion failed (exit " + ffResult.exitCode + "): " + (ffResult.stderr || "").trim() + " — serving source", "youtube");
+      }
+    }
+  }
+
+  // Tell the host the real container of the file we're serving so it names
+  // the saved file honestly. finalPath is either the converted temp file
+  // (target ext) or the untouched source (e.g. .webm) when conversion was
+  // skipped/unavailable/failed — without this the host would name a served
+  // .webm by the requested format (aac -> .m4a) and mislabel it.
+  var finalExt = (finalPath.match(/\.([^.]+)$/) || [])[1];
+  api.log("info", "Download resolve -> " + finalPath, "youtube");
+  return {
+    url: "file://" + finalPath,
+    headers: null,
+    ext: finalExt || undefined,
+    metadata: {
+      title: title,
+      artist: artistName || undefined,
+      album: albumName || undefined
+    }
+  };
 }
 
 async function activate(api) {
@@ -463,9 +633,44 @@ async function activate(api) {
     }
   });
 
+  api.playback.onResolveStreamByUri("youtube", async function(videoId, quality) {
+    if (!ytDlpVersion) {
+      api.log("warn", "Stream URI resolve skipped — yt-dlp not available", "youtube");
+      return null;
+    }
+    if (!VIDEO_ID_RE.test(videoId)) {
+      api.log("warn", "Stream URI resolve: invalid video id " + videoId, "youtube");
+      return null;
+    }
+    try {
+      var src = await resolveSourceWith(api, function() { return downloadById(api, videoId); });
+      return src ? "file://" + src.filePath : null;
+    } catch (e) {
+      api.log("error", "Stream URI resolve failed: " + (e && e.message ? e.message : e), "youtube");
+      return null;
+    }
+  });
+
   api.downloads.onResolveByUri("youtube-download", async function(uri, format) {
-    // URI-based resolution is not implemented; downloads resolve by metadata.
-    return null;
+    if (!ytDlpVersion) {
+      api.log("warn", "Download URI resolve skipped — yt-dlp not available", "youtube");
+      return null;
+    }
+    var videoId = parseYoutubeUri(uri);
+    if (!videoId) {
+      api.log("warn", "Download URI resolve: unrecognized uri " + uri, "youtube");
+      return null;
+    }
+    try {
+      return await resolveSourceWith(api, function() { return downloadById(api, videoId); }, function(src) {
+        // An id-based download carries no searched metadata; title falls back to the
+        // yt-dlp videoTitle (if any) then the id, and artist/album are unknown (null).
+        return convertForFormat(api, src, format, src.videoTitle || videoId, null, null);
+      });
+    } catch (e) {
+      console.error("[youtube] download URI resolve failed:", e, e.stack || "");
+      return null;
+    }
   });
 
   api.downloads.onGetQualities("youtube-download", function() {
@@ -484,71 +689,8 @@ async function activate(api) {
     }
     title = stripRemasterSuffix(title);
     try {
-      return await resolveSource(api, title, artistName, durationSecs, async function (src) {
-        var srcPath = src.filePath;
-        var fmt = format || "aac";
-        var spec = FORMATS[fmt];
-        api.log("info", "Preparing " + title + " as " + fmt, "youtube");
-
-        var finalPath = srcPath;
-        var srcExt = (srcPath.match(/\.([^.]+)$/) || [])[1];
-
-        if (!spec) {
-          api.log("warn", "Unknown target format: " + fmt + " — using source as-is", "youtube");
-        } else if (!ffmpegVersion) {
-          // ffmpeg is optional; without it we cannot convert. Serve the original download
-          // (with its true extension) rather than mislabeling it as the requested format.
-          api.log("warn", "ffmpeg not available — serving original download (." + (srcExt || "?") + ") without conversion", "youtube");
-        } else {
-          var ext = spec.ext;
-          var probe = await probeAudio(api, srcPath);
-          if (probe) {
-            api.log("info", "Source: " + (probe.codec || "?") + " @ " + (probe.bitrateKbps || "?") + " kb/s", "youtube");
-          } else {
-            api.log("warn", "Could not probe source — falling back to transcode defaults", "youtube");
-          }
-          // destPath in the plugin's temp/ dir (wiped on startup); unique per request to
-          // avoid two concurrent conversions clobbering the same file.
-          var destName = src.videoId + "." + (convSeq++) + "." + ext;
-          var destPath = await api.storage.files.writeText(["temp", destName], "");
-          var conv = buildConvertArgs(srcPath, destPath, fmt, probe);
-
-          if (!conv) {
-            api.log("warn", "No conversion rule for format: " + fmt + " — using source as-is", "youtube");
-          } else if (conv.mode === "copy" && srcExt === ext) {
-            api.log("info", "Source already in target container — reusing without conversion", "youtube");
-          } else {
-            var label = conv.mode === "copy" ? "Remuxing (codec copy, no re-encode)" :
-              "Transcoding to " + fmt + " @ " + (conv.bitrate ? conv.bitrate + "k" : "default");
-            api.log("info", label + " -> " + destPath, "youtube");
-            var ffResult = await api.system.exec("ffmpeg", conv.args);
-            if (ffResult.exitCode === 0) {
-              finalPath = destPath;
-              api.log("info", "Conversion complete: " + destPath, "youtube");
-            } else {
-              api.log("error", "Conversion failed (exit " + ffResult.exitCode + "): " + (ffResult.stderr || "").trim() + " — serving source", "youtube");
-            }
-          }
-        }
-
-        // Tell the host the real container of the file we're serving so it names
-        // the saved file honestly. finalPath is either the converted temp file
-        // (target ext) or the untouched source (e.g. .webm) when conversion was
-        // skipped/unavailable/failed — without this the host would name a served
-        // .webm by the requested format (aac -> .m4a) and mislabel it.
-        var finalExt = (finalPath.match(/\.([^.]+)$/) || [])[1];
-
-        api.log("info", "Download resolve -> " + finalPath, "youtube");
-        return {
-          url: "file://" + finalPath,
-          headers: null,
-          ext: finalExt || undefined,
-          metadata: {
-            title: title,
-            artist: artistName || undefined,
-            album: albumName || undefined
-          }
-        };
+      return await resolveSource(api, title, artistName, durationSecs, function (src) {
+        return convertForFormat(api, src, format, title, artistName, albumName);
       });
     } catch (e) {
       console.error("[youtube] download resolve failed:", e, e.stack || "");
@@ -569,6 +711,73 @@ async function activate(api) {
     await checkTools(api);
   });
 
+  api.ui.onAction("youtube-search-submit", async function(data) {
+    searchQuery = data && typeof data.query === "string" ? data.query : "";
+    if (!searchQuery.trim()) { searchResults = null; renderSearchView(api); return; }
+    if (!ytDlpVersion) { renderSearchView(api); return; }
+    searching = true;
+    renderSearchView(api);
+    try {
+      searchResults = await runYtSearch(api, searchQuery);
+    } catch (e) {
+      api.log("error", "Search failed: " + (e && e.message ? e.message : e), "youtube");
+      searchResults = []; // renderSearchView will display "No results."
+    }
+    searching = false;
+    renderSearchView(api);
+  });
+
+  function findResult(videoId) {
+    if (!searchResults) return null;
+    for (var i = 0; i < searchResults.length; i++) {
+      if (searchResults[i].videoId === videoId) return searchResults[i];
+    }
+    return null;
+  }
+
+  // Map a { selectedIds } payload to the matching candidates (skips unknown ids).
+  function selectedResults(data) {
+    var ids = data && data.selectedIds ? data.selectedIds : [];
+    var out = [];
+    for (var i = 0; i < ids.length; i++) {
+      var c = findResult(ids[i]);
+      if (c) out.push(c);
+    }
+    return out;
+  }
+
+  api.ui.onAction("youtube-play", function(data) {
+    var chosen = selectedResults(data);
+    if (chosen.length === 0) return;
+    var tracks = [];
+    for (var i = 0; i < chosen.length; i++) {
+      var c = chosen[i];
+      var parsed = parseTrackTitle(c.title, c.channel);
+      tracks.push({
+        title: parsed.title || c.title || c.videoId,
+        artist_name: parsed.artist || c.channel || null,
+        duration_secs: c.durationSecs != null ? c.durationSecs : null,
+        path: "youtube://" + c.videoId
+      });
+    }
+    api.playback.playTracks(tracks, 0);
+  });
+
+  api.ui.onAction("youtube-download", function(data) {
+    var chosen = selectedResults(data);
+    if (chosen.length === 0) return;
+    for (var i = 0; i < chosen.length; i++) {
+      var c = chosen[i];
+      var parsed = parseTrackTitle(c.title, c.channel);
+      api.downloads.enqueue({
+        title: parsed.title || c.title || c.videoId,
+        artistName: parsed.artist || c.channel || null,
+        uri: "youtube://" + c.videoId,
+        provider: "youtube-download"
+      });
+    }
+  });
+
   api.ui.onAction("youtube-install-ytdlp", function() {
     api.network.openUrl(YTDLP_INSTALL_URL);
   });
@@ -582,6 +791,7 @@ async function activate(api) {
   });
 
   renderSettings(api);
+  renderSearchView(api);
 }
 
 function makeToolRow(name, localVersion, latestVersion, installAction) {
@@ -665,6 +875,51 @@ function renderSettings(api) {
   });
 }
 
+function renderSearchView(api) {
+  var children = [
+    {
+      type: "search-input",
+      placeholder: "Search YouTube…",
+      action: "youtube-search-submit",
+      submitOnly: true,
+      value: searchQuery
+    }
+  ];
+
+  if (!ytDlpVersion) {
+    children.push({ type: "text", content: "yt-dlp is not installed. Open the YouTube settings panel to install it." });
+  } else if (searching) {
+    children.push({ type: "loading", message: "Searching YouTube…" });
+  } else if (searchResults && searchResults.length > 0) {
+    var items = [];
+    for (var i = 0; i < searchResults.length; i++) {
+      var c = searchResults[i];
+      var parsed = parseTrackTitle(c.title, c.channel);
+      items.push({
+        id: c.videoId,
+        title: parsed.title || c.title || c.videoId,
+        subtitle: parsed.artist || c.channel || "",
+        duration: formatDuration(c.durationSecs)
+      });
+    }
+    children.push({
+      type: "track-row-list",
+      selectable: true,
+      items: items,
+      actions: [
+        { id: "youtube-play", label: "Play" },
+        { id: "youtube-download", label: "Download" }
+      ]
+    });
+  } else if (searchResults && searchResults.length === 0) {
+    children.push({ type: "text", content: "No results." });
+  } else {
+    children.push({ type: "text", content: "Search YouTube to play or download a track." });
+  }
+
+  api.ui.setViewData("youtube-search", { type: "layout", direction: "vertical", children: children });
+}
+
 function deactivate() {
   ytDlpVersion = null;
   ffmpegVersion = null;
@@ -673,6 +928,9 @@ function deactivate() {
   checking = false;
   inFlightFiles = {};
   lastSourceFile = null;
+  searchQuery = "";
+  searchResults = null;
+  searching = false;
 }
 
-return { activate: activate, deactivate: deactivate };
+return { activate: activate, deactivate: deactivate, _parseTrackTitle: parseTrackTitle, _formatDuration: formatDuration };
