@@ -1,5 +1,17 @@
 # Changelog
 
+## v1.2.0
+- Restyled the search view and settings panel to match the TIDAL plugin:
+  - A dependency status banner now sits atop the search view (error when `yt-dlp`
+    is missing, warning when `ffmpeg` is missing, success when both are present),
+    with a **Refresh** button.
+  - The search box shows a visible **Search** button, and result rows carry
+    icon-labeled toolbar actions (▶ Play, + Queue, ⬇ Download).
+  - Clicking a result row now plays that single video.
+  - Settings/install buttons adopt the shared `ds-btn` styling.
+- New **Queue** action appends selected videos to the playback queue
+  (`insertTracks`).
+
 ## v1.1.1
 - Search results now show each video's thumbnail.
 

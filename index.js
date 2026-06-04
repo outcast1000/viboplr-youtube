@@ -67,6 +67,19 @@ function parseTrackTitle(rawTitle, channel) {
   return { artist: channel || "", title: cleaned };
 }
 
+// Map a search candidate to a host PluginTrack, parsing "Artist - Song" out of
+// the raw video title. Shared by the Play / Queue / row-click actions so they
+// can't drift. The path is the exact-id youtube:// uri (not a fuzzy re-search).
+function buildTrack(c) {
+  var parsed = parseTrackTitle(c.title, c.channel);
+  return {
+    title: parsed.title || c.title || c.videoId,
+    artist_name: parsed.artist || c.channel || null,
+    duration_secs: c.durationSecs != null ? c.durationSecs : null,
+    path: "youtube://" + c.videoId
+  };
+}
+
 var YTDLP_INSTALL_URL = "https://github.com/yt-dlp/yt-dlp#installation";
 var FFMPEG_INSTALL_URL = "https://ffmpeg.org/download.html";
 
@@ -757,29 +770,37 @@ async function activate(api) {
     var chosen = selectedResults(data);
     if (chosen.length === 0) return;
     var tracks = [];
-    for (var i = 0; i < chosen.length; i++) {
-      var c = chosen[i];
-      var parsed = parseTrackTitle(c.title, c.channel);
-      tracks.push({
-        title: parsed.title || c.title || c.videoId,
-        artist_name: parsed.artist || c.channel || null,
-        duration_secs: c.durationSecs != null ? c.durationSecs : null,
-        path: "youtube://" + c.videoId
-      });
-    }
+    for (var i = 0; i < chosen.length; i++) tracks.push(buildTrack(chosen[i]));
     api.playback.playTracks(tracks, 0);
+  });
+
+  api.ui.onAction("youtube-queue", function(data) {
+    var chosen = selectedResults(data);
+    if (chosen.length === 0) return;
+    var tracks = [];
+    for (var i = 0; i < chosen.length; i++) tracks.push(buildTrack(chosen[i]));
+    api.playback.insertTracks(tracks, -1);
+  });
+
+  // Click-to-play a single row. The host sends the row's id (a bare videoId) as
+  // data.itemId; resolve it against the current results and play just that one.
+  api.ui.onAction("youtube-play-one", function(data) {
+    var id = data && data.itemId;
+    if (!id) return;
+    var c = findResult(id);
+    if (!c) return;
+    api.playback.playTracks([buildTrack(c)], 0);
   });
 
   api.ui.onAction("youtube-download", function(data) {
     var chosen = selectedResults(data);
     if (chosen.length === 0) return;
     for (var i = 0; i < chosen.length; i++) {
-      var c = chosen[i];
-      var parsed = parseTrackTitle(c.title, c.channel);
+      var t = buildTrack(chosen[i]);
       api.downloads.enqueue({
-        title: parsed.title || c.title || c.videoId,
-        artistName: parsed.artist || c.channel || null,
-        uri: "youtube://" + c.videoId,
+        title: t.title,
+        artistName: t.artist_name,
+        uri: t.path,
         provider: "youtube-download"
       });
     }
@@ -822,7 +843,8 @@ function makeToolRow(name, localVersion, latestVersion, installAction) {
       type: "button",
       label: installed ? "Installation Page" : "Install",
       action: installAction,
-      variant: installed ? undefined : "accent"
+      variant: installed ? undefined : "accent",
+      className: installed ? "ds-btn ds-btn--sm ds-btn--secondary" : "ds-btn ds-btn--sm ds-btn--accent"
     }
   };
 }
@@ -874,7 +896,8 @@ function renderSettings(api) {
             type: "button",
             label: checking ? "Checking..." : "Refresh",
             action: "youtube-refresh",
-            disabled: checking
+            disabled: checking,
+            className: "ds-btn ds-btn--sm ds-btn--secondary"
           }
         ]
       }
@@ -882,20 +905,47 @@ function renderSettings(api) {
   });
 }
 
+// Dependency status banner shown atop the search view, mirroring TIDAL's health
+// banner. Reflects the on-demand detectTools state; "Refresh" re-runs checkTools.
+function makeStatusBanner() {
+  var bannerClass, bannerText;
+  if (checking) {
+    bannerClass = "ds-banner";
+    bannerText = "Checking dependencies…";
+  } else if (!ytDlpVersion) {
+    bannerClass = "ds-banner ds-banner--error";
+    bannerText = "yt-dlp is not installed — open YouTube settings to install it";
+  } else if (!ffmpegVersion) {
+    bannerClass = "ds-banner ds-banner--warning";
+    bannerText = "ffmpeg not installed — downloads are served without conversion";
+  } else {
+    bannerClass = "ds-banner ds-banner--success";
+    bannerText = "Ready — yt-dlp " + ytDlpVersion + ", ffmpeg " + ffmpegVersion;
+  }
+  return {
+    type: "layout",
+    direction: "horizontal",
+    className: bannerClass,
+    children: [
+      { type: "text", content: bannerText },
+      { type: "button", label: checking ? "Checking..." : "Refresh", action: "youtube-refresh", disabled: checking, className: "ds-btn ds-btn--sm ds-btn--secondary" }
+    ]
+  };
+}
+
 function renderSearchView(api) {
   var children = [
+    makeStatusBanner(),
     {
       type: "search-input",
-      placeholder: "Search YouTube…",
+      placeholder: "Search YouTube...",
       action: "youtube-search-submit",
-      submitOnly: true,
-      value: searchQuery
+      value: searchQuery,
+      buttonLabel: "Search"
     }
   ];
 
-  if (!ytDlpVersion) {
-    children.push({ type: "text", content: "yt-dlp is not installed. Open the YouTube settings panel to install it." });
-  } else if (searching) {
+  if (searching) {
     children.push({ type: "loading", message: "Searching YouTube…" });
   } else if (searchResults && searchResults.length > 0) {
     var items = [];
@@ -907,7 +957,8 @@ function renderSearchView(api) {
         title: parsed.title || c.title || c.videoId,
         subtitle: parsed.artist || c.channel || "",
         duration: formatDuration(c.durationSecs),
-        imageUrl: thumbnailUrl(c.videoId)
+        imageUrl: thumbnailUrl(c.videoId),
+        action: "youtube-play-one"
       });
     }
     children.push({
@@ -915,14 +966,15 @@ function renderSearchView(api) {
       selectable: true,
       items: items,
       actions: [
-        { id: "youtube-play", label: "Play" },
-        { id: "youtube-download", label: "Download" }
+        { id: "youtube-play", label: "Play", icon: "▶" },
+        { id: "youtube-queue", label: "Queue", icon: "+" },
+        { id: "youtube-download", label: "Download", icon: "⬇" }
       ]
     });
   } else if (searchResults && searchResults.length === 0) {
-    children.push({ type: "text", content: "No results." });
+    children.push({ type: "text", content: "No results.", className: "ds-empty" });
   } else {
-    children.push({ type: "text", content: "Search YouTube to play or download a track." });
+    children.push({ type: "text", content: "Search YouTube to play or download a track.", className: "ds-empty" });
   }
 
   api.ui.setViewData("youtube-search", { type: "layout", direction: "vertical", children: children });

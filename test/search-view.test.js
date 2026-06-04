@@ -31,6 +31,16 @@ function findNode(node, type) {
   return null;
 }
 
+// Collect every node of a given type (banner + body both contain text nodes).
+function findAllNodes(node, type, acc) {
+  acc = acc || [];
+  if (!node || typeof node !== "object") return acc;
+  if (node.type === type) acc.push(node);
+  const kids = node.children || node.items || [];
+  for (const k of kids) findAllNodes(k, type, acc);
+  return acc;
+}
+
 test("renders a search-input on activate", async () => {
   const api = baseApi();
   const plugin = loadPlugin();
@@ -94,8 +104,8 @@ test("submit with no candidates shows 'No results' and clears the loading state"
   const view = lastView(api, "youtube-search");
   assert.ok(!findNode(view, "loading"), "loading state cleared");
   assert.ok(!findNode(view, "track-row-list"), "no results list");
-  const text = findNode(view, "text");
-  assert.ok(text && text.content === "No results.", "shows 'No results.'");
+  const texts = findAllNodes(view, "text");
+  assert.ok(texts.some((t) => t.content === "No results."), "shows 'No results.'");
 });
 
 function searchApi() {
@@ -131,6 +141,68 @@ test("youtube-play builds youtube:// PluginTracks and calls playTracks", async (
   assert.equal(t2.path, "youtube://abcdefghijk");
   assert.equal(t2.title, "Song Two");
   assert.equal(t2.artist_name, "Artist Two");
+});
+
+test("status banner is success when both tools are present", async () => {
+  const api = baseApi();
+  const plugin = loadPlugin();
+  await plugin.activate(api);
+  const view = lastView(api, "youtube-search");
+  const banner = findNode(view, "layout").children.find((c) => c.className && c.className.includes("ds-banner"));
+  assert.ok(banner, "has a ds-banner row");
+  assert.ok(banner.className.includes("ds-banner--success"), "success variant");
+  assert.ok(/Ready/.test(findNode(banner, "text").content), "ready text");
+  const btn = findNode(banner, "button");
+  assert.equal(btn.action, "youtube-refresh", "Refresh wired to youtube-refresh");
+});
+
+test("status banner is error when yt-dlp is missing", async () => {
+  const api = makeApi({
+    storage: { kv: { cacheMaxMb: 100 } },
+    exec: [
+      { match: { cmd: "yt-dlp", argsInclude: ["--version"] }, result: { exitCode: 1, stderr: "not found" } },
+    ],
+  });
+  const plugin = loadPlugin();
+  await plugin.activate(api);
+  const view = lastView(api, "youtube-search");
+  const banner = findNode(view, "layout").children.find((c) => c.className && c.className.includes("ds-banner"));
+  assert.ok(banner.className.includes("ds-banner--error"), "error variant");
+});
+
+test("track rows carry icons and a click-to-play action", async () => {
+  const api = searchApi();
+  const plugin = loadPlugin();
+  await plugin.activate(api);
+  await api._handlers["action:youtube-search-submit"]({ query: "rick astley" });
+  const list = findNode(lastView(api, "youtube-search"), "track-row-list");
+  assert.deepEqual(list.actions.map((a) => a.id), ["youtube-play", "youtube-queue", "youtube-download"]);
+  assert.ok(list.actions.every((a) => a.icon), "every toolbar action has an icon");
+  assert.ok(list.items.every((it) => it.action === "youtube-play-one"), "rows click-to-play");
+});
+
+test("youtube-play-one plays just the clicked video", async () => {
+  const api = searchApi();
+  const plugin = loadPlugin();
+  await plugin.activate(api);
+  await api._handlers["action:youtube-search-submit"]({ query: "rick astley" });
+  await api._handlers["action:youtube-play-one"]({ itemId: "abcdefghijk" });
+  assert.equal(api.calls.playTrack.length, 1);
+  assert.equal(api.calls.playTrack[0].tracks.length, 1, "exactly one track");
+  assert.equal(api.calls.playTrack[0].tracks[0].path, "youtube://abcdefghijk");
+});
+
+test("youtube-queue inserts selected tracks at the end of the queue", async () => {
+  const api = searchApi();
+  const plugin = loadPlugin();
+  await plugin.activate(api);
+  await api._handlers["action:youtube-search-submit"]({ query: "rick astley" });
+  await api._handlers["action:youtube-queue"]({ selectedIds: ["dQw4w9WgXcQ", "abcdefghijk"] });
+  assert.equal(api.calls.insertTracks.length, 1, "insertTracks called once");
+  const rec = api.calls.insertTracks[0];
+  assert.equal(rec.position, -1, "appended to the queue");
+  assert.equal(rec.tracks.length, 2);
+  assert.equal(rec.tracks[0].path, "youtube://dQw4w9WgXcQ");
 });
 
 test("youtube-download enqueues once per selected id with the youtube:// uri", async () => {

@@ -67,7 +67,7 @@ function execMatches(entry, cmd, args) {
 
 function makeApi(config) {
   config = config || {};
-  const calls = { exec: [], log: [], setViewData: [], openUrl: [], playTrack: [], enqueue: [] };
+  const calls = { exec: [], log: [], setViewData: [], openUrl: [], playTrack: [], insertTracks: [], enqueue: [] };
   const handlers = {};
   const storage = makeStorage(config.storage);
 
@@ -113,6 +113,7 @@ function makeApi(config) {
       onResolveStreamByUri: (scheme, fn) => { handlers["streamuri:" + scheme] = fn; },
       playTrack: (track) => { calls.playTrack.push(track); },
       playTracks: (tracks, startIndex, context) => { calls.playTrack.push({ tracks, startIndex, context }); },
+      insertTracks: (tracks, position) => { calls.insertTracks.push({ tracks, position }); },
     },
     downloads: {
       onResolveByUri: (id, fn) => { handlers["uri:" + id] = fn; },
