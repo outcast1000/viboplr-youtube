@@ -7,6 +7,10 @@ var cacheMaxMb = 100;
 var searchQuery = "";
 var searchResults = null; // array of candidates, or null before first search
 var searching = false;
+// Set once we've nudged the user about a missing yt-dlp from the background
+// stream-resolver path, so auto-continue doesn't pop the install modal on every
+// track. Reset by checkTools so a later "Refresh" re-arms the nudge.
+var nudgedMissingYtDlp = false;
 
 // Filenames currently being produced/consumed by an in-flight resolve. cleanupCache
 // never evicts these, so a parallel download cannot delete another's just-written file.
@@ -83,6 +87,43 @@ function buildTrack(c) {
 var YTDLP_INSTALL_URL = "https://github.com/yt-dlp/yt-dlp#installation";
 var FFMPEG_INSTALL_URL = "https://ffmpeg.org/download.html";
 
+// Detect the host OS so the Dependencies rows show the right install command.
+// Mirrors the host's DependencyModal platform detection (navigator.platform).
+// The actual command list also lives in the host's Rust dependency registry —
+// keep INSTALL_CMDS in sync with it (brew / winget / apt).
+function hostPlatform() {
+  var p = (typeof navigator !== "undefined" && navigator.platform ? navigator.platform : "").toLowerCase();
+  if (p.indexOf("mac") !== -1) return "macos";
+  if (p.indexOf("win") !== -1) return "windows";
+  return "linux";
+}
+
+var INSTALL_CMDS = {
+  "yt-dlp": { macos: "brew install yt-dlp", windows: "winget install yt-dlp.yt-dlp", linux: "sudo apt install yt-dlp" },
+  "ffmpeg": { macos: "brew install ffmpeg", windows: "winget install Gyan.FFmpeg", linux: "sudo apt install ffmpeg" }
+};
+
+// The terminal command to install `tool` on the current OS, or "" if unknown.
+function installCommand(tool) {
+  var byTool = INSTALL_CMDS[tool];
+  return byTool ? (byTool[hostPlatform()] || "") : "";
+}
+
+// Ask the host to open its platform-aware install modal (copy button + recheck).
+// feature must match the plugin's manifest name so the modal resolves the reason.
+function promptInstall(api, tool) {
+  api.ui.requestAction("require-dependency", { name: tool, feature: "YouTube" });
+}
+
+// Guard for user-initiated actions (search/play/queue/download): when yt-dlp is
+// absent, pop the host install modal instead of silently doing nothing, and
+// return false so the caller bails. Returns true when yt-dlp is available.
+function requireYtDlp(api) {
+  if (ytDlpVersion) return true;
+  promptInstall(api, "yt-dlp");
+  return false;
+}
+
 // ---------------------------------------------------------------------------
 // Small path helpers (shared so callers can't drift)
 // ---------------------------------------------------------------------------
@@ -154,6 +195,8 @@ async function checkTools(api) {
   await detectTools(api);
   await fetchLatestVersions(api);
   checking = false;
+  // Re-arm the background-resolver nudge whenever the user explicitly rechecks.
+  nudgedMissingYtDlp = false;
   renderSettings(api);
 }
 
@@ -639,6 +682,12 @@ async function activate(api) {
   api.playback.onStreamResolve("youtube-fallback", async function(title, artistName, albumName, durationSecs) {
     if (!ytDlpVersion) {
       api.log("warn", "Stream resolve skipped — yt-dlp not available", "youtube");
+      // A library track fell through to YouTube but yt-dlp is missing. Nudge the
+      // user once (not per auto-continued track) toward the install modal.
+      if (!nudgedMissingYtDlp) {
+        nudgedMissingYtDlp = true;
+        promptInstall(api, "yt-dlp");
+      }
       return null;
     }
     title = stripRemasterSuffix(title);
@@ -734,7 +783,7 @@ async function activate(api) {
   api.ui.onAction("youtube-search-submit", async function(data) {
     searchQuery = data && typeof data.query === "string" ? data.query : "";
     if (!searchQuery.trim()) { searchResults = null; renderSearchView(api); return; }
-    if (!ytDlpVersion) { renderSearchView(api); return; }
+    if (!requireYtDlp(api)) { renderSearchView(api); return; }
     searching = true;
     renderSearchView(api);
     try {
@@ -769,6 +818,7 @@ async function activate(api) {
   api.ui.onAction("youtube-play", function(data) {
     var chosen = selectedResults(data);
     if (chosen.length === 0) return;
+    if (!requireYtDlp(api)) return;
     var tracks = [];
     for (var i = 0; i < chosen.length; i++) tracks.push(buildTrack(chosen[i]));
     api.playback.playTracks(tracks, 0);
@@ -777,6 +827,7 @@ async function activate(api) {
   api.ui.onAction("youtube-queue", function(data) {
     var chosen = selectedResults(data);
     if (chosen.length === 0) return;
+    if (!requireYtDlp(api)) return;
     var tracks = [];
     for (var i = 0; i < chosen.length; i++) tracks.push(buildTrack(chosen[i]));
     api.playback.insertTracks(tracks, -1);
@@ -787,6 +838,7 @@ async function activate(api) {
   api.ui.onAction("youtube-play-one", function(data) {
     var id = data && data.itemId;
     if (!id) return;
+    if (!requireYtDlp(api)) return;
     var c = findResult(id);
     if (!c) return;
     api.playback.playTracks([buildTrack(c)], 0);
@@ -795,6 +847,7 @@ async function activate(api) {
   api.ui.onAction("youtube-download", function(data) {
     var chosen = selectedResults(data);
     if (chosen.length === 0) return;
+    if (!requireYtDlp(api)) return;
     for (var i = 0; i < chosen.length; i++) {
       var t = buildTrack(chosen[i]);
       api.downloads.enqueue({
@@ -806,12 +859,17 @@ async function activate(api) {
     }
   });
 
+  // When the tool is missing, open the host's platform-aware install modal
+  // (shows the exact brew/winget/apt command with a Copy button + recheck).
+  // When it is already installed, "Installation Page" just opens the docs URL.
   api.ui.onAction("youtube-install-ytdlp", function() {
-    api.network.openUrl(YTDLP_INSTALL_URL);
+    if (ytDlpVersion) api.network.openUrl(YTDLP_INSTALL_URL);
+    else promptInstall(api, "yt-dlp");
   });
 
   api.ui.onAction("youtube-install-ffmpeg", function() {
-    api.network.openUrl(FFMPEG_INSTALL_URL);
+    if (ffmpegVersion) api.network.openUrl(FFMPEG_INSTALL_URL);
+    else promptInstall(api, "ffmpeg");
   });
 
   fetchLatestVersions(api).then(function() {
@@ -826,7 +884,11 @@ function makeToolRow(name, localVersion, latestVersion, installAction) {
   var installed = !!localVersion;
   var desc;
   if (!installed) {
-    desc = "Not installed";
+    // Surface the exact platform-correct command (macOS/Windows/Linux) so the
+    // user can install without leaving the app. The "Install" button opens the
+    // host's modal with a one-click Copy of this same command.
+    var cmd = installCommand(name);
+    desc = cmd ? "Not installed — run: " + cmd : "Not installed";
   } else if (latestVersion && localVersion !== latestVersion) {
     desc = "Installed: " + localVersion + "  →  Latest: " + latestVersion;
   } else if (latestVersion) {
@@ -909,27 +971,34 @@ function renderSettings(api) {
 // banner. Reflects the on-demand detectTools state; "Refresh" re-runs checkTools.
 function makeStatusBanner() {
   var bannerClass, bannerText;
+  // When a tool is missing, offer a one-click Install button that opens the
+  // host's platform-aware modal (correct command per OS + Copy + recheck).
+  var installButton = null;
   if (checking) {
     bannerClass = "ds-banner";
     bannerText = "Checking dependencies…";
   } else if (!ytDlpVersion) {
     bannerClass = "ds-banner ds-banner--error";
-    bannerText = "yt-dlp is not installed — open YouTube settings to install it";
+    var ytCmd = installCommand("yt-dlp");
+    bannerText = "yt-dlp is not installed" + (ytCmd ? " — run: " + ytCmd : "") + ". YouTube playback and downloads are disabled until it is.";
+    installButton = { type: "button", label: "Install yt-dlp", action: "youtube-install-ytdlp", className: "ds-btn ds-btn--sm ds-btn--accent" };
   } else if (!ffmpegVersion) {
     bannerClass = "ds-banner ds-banner--warning";
-    bannerText = "ffmpeg not installed — downloads are served without conversion";
+    var ffCmd = installCommand("ffmpeg");
+    bannerText = "ffmpeg not installed" + (ffCmd ? " — run: " + ffCmd : "") + ". Downloads are served without format conversion (MP3/FLAC unavailable).";
+    installButton = { type: "button", label: "Install ffmpeg", action: "youtube-install-ffmpeg", className: "ds-btn ds-btn--sm ds-btn--accent" };
   } else {
     bannerClass = "ds-banner ds-banner--success";
     bannerText = "Ready — yt-dlp " + ytDlpVersion + ", ffmpeg " + ffmpegVersion;
   }
+  var children = [{ type: "text", content: bannerText }];
+  if (installButton) children.push(installButton);
+  children.push({ type: "button", label: checking ? "Checking..." : "Refresh", action: "youtube-refresh", disabled: checking, className: "ds-btn ds-btn--sm ds-btn--secondary" });
   return {
     type: "layout",
     direction: "horizontal",
     className: bannerClass,
-    children: [
-      { type: "text", content: bannerText },
-      { type: "button", label: checking ? "Checking..." : "Refresh", action: "youtube-refresh", disabled: checking, className: "ds-btn ds-btn--sm ds-btn--secondary" }
-    ]
+    children: children
   };
 }
 

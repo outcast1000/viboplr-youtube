@@ -170,6 +170,69 @@ test("status banner is error when yt-dlp is missing", async () => {
   assert.ok(banner.className.includes("ds-banner--error"), "error variant");
 });
 
+function missingYtDlpApi() {
+  // yt-dlp absent (exit 1); ffmpeg present. The install command shown depends on
+  // the host platform (brew/winget/apt); the plugin picks it via navigator.platform.
+  return makeApi({
+    storage: { kv: { cacheMaxMb: 100 } },
+    exec: [
+      { match: { cmd: "yt-dlp", argsInclude: ["--version"] }, result: { exitCode: 1, stderr: "not found" } },
+      { match: { cmd: "ffmpeg", argsInclude: ["-version"] }, result: { exitCode: 0, stdout: "ffmpeg version 6.1\n" } },
+    ],
+  });
+}
+
+test("missing-yt-dlp banner surfaces the install command and an Install button", async () => {
+  const api = missingYtDlpApi();
+  const plugin = loadPlugin();
+  await plugin.activate(api);
+  const view = lastView(api, "youtube-search");
+  const banner = findNode(view, "layout").children.find((c) => c.className && c.className.includes("ds-banner"));
+  const text = findNode(banner, "text").content;
+  // Platform-agnostic: brew/winget/apt all end in "install yt-dlp".
+  assert.ok(/install yt-dlp/.test(text), "shows the platform install command: " + text);
+  const installBtn = (banner.children || []).find((c) => c.type === "button" && c.action === "youtube-install-ytdlp");
+  assert.ok(installBtn, "has an Install yt-dlp button");
+});
+
+test("Install button opens the host dependency modal when yt-dlp is missing", async () => {
+  const api = missingYtDlpApi();
+  const plugin = loadPlugin();
+  await plugin.activate(api);
+  await api._handlers["action:youtube-install-ytdlp"]();
+  assert.equal(api.calls.openUrl.length, 0, "does not just open a browser tab");
+  const req = api.calls.requestAction.find((r) => r.action === "require-dependency");
+  assert.ok(req, "requested the host dependency modal");
+  assert.equal(req.payload.name, "yt-dlp");
+  assert.equal(req.payload.feature, "YouTube");
+});
+
+test("user actions prompt the install modal instead of silently failing when yt-dlp is missing", async () => {
+  const api = missingYtDlpApi();
+  const plugin = loadPlugin();
+  await plugin.activate(api);
+  // Search submit: should not run a search; should request the modal.
+  await api._handlers["action:youtube-search-submit"]({ query: "rick astley" });
+  const searched = api.calls.exec.some((e) => e.args.join(" ").includes("ytsearch"));
+  assert.equal(searched, false, "no search runs without yt-dlp");
+  assert.ok(
+    api.calls.requestAction.some((r) => r.action === "require-dependency" && r.payload.name === "yt-dlp"),
+    "search-submit prompted the install modal",
+  );
+});
+
+test("background stream-resolver nudges to install yt-dlp at most once", async () => {
+  const api = missingYtDlpApi();
+  const plugin = loadPlugin();
+  await plugin.activate(api);
+  const r1 = await api._handlers["stream:youtube-fallback"]("Some Song", "Some Artist", null, 200);
+  const r2 = await api._handlers["stream:youtube-fallback"]("Another Song", "Another Artist", null, 180);
+  assert.equal(r1, null);
+  assert.equal(r2, null);
+  const prompts = api.calls.requestAction.filter((r) => r.action === "require-dependency");
+  assert.equal(prompts.length, 1, "nudged exactly once across two fallback resolves");
+});
+
 test("track rows carry icons and a click-to-play action", async () => {
   const api = searchApi();
   const plugin = loadPlugin();

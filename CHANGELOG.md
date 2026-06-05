@@ -1,5 +1,24 @@
 # Changelog
 
+## v1.3.0
+- Plugin now ships a **YouTube icon** (`manifest.icon` + the sidebar item icon),
+  replacing the generic magnifying-glass / "Y" letter fallback in the sidebar and
+  Extensions list.
+- Greatly improved the **missing-dependency UX** (first-run with no `yt-dlp` /
+  `ffmpeg`):
+  - The Dependencies settings rows and the search-view banner now show the exact
+    platform-correct install command (macOS `brew`, Windows `winget`, Linux `apt`).
+  - The banner gains a one-click **Install** button, and the settings **Install**
+    button now opens the host's platform-aware dependency modal (with a Copy
+    button and re-check) instead of just opening a docs page in the browser.
+  - User actions (search / play / queue / download) now pop the install modal when
+    `yt-dlp` is missing, instead of silently doing nothing.
+  - When a library track falls back to YouTube but `yt-dlp` is absent, the plugin
+    nudges the user to install it **once** per session (not once per track).
+  - The "Install" button / modal still requires a host that understands the
+    `require-dependency` action; on older hosts the install command is still shown
+    inline so the user can copy it manually.
+
 ## v1.2.0
 - Restyled the search view and settings panel to match the TIDAL plugin:
   - A dependency status banner now sits atop the search view (error when `yt-dlp`
