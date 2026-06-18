@@ -1,5 +1,20 @@
 # Changelog
 
+## v1.4.0
+- **Dependency handling moved to the host.** The plugin no longer detects tools,
+  checks releases, or prompts to install — it only declares `binaryDependencies`
+  in the manifest and reads the host's cached status via `api.system.getDependency`
+  (cache-only, no network). The host now owns detection, updates, and the
+  missing-required-dependency UX (a sidebar dot + Settings → Dependencies).
+  - Removed: the GitHub release checks (`fetchLatestVersions`), the `--version`
+    probes (`detectYtDlp`/`detectFfmpeg`), the install prompt (`require-dependency`),
+    the in-view status banner, and the plugin's own Dependencies settings section.
+  - **Nothing dependency-related runs during `activate()`** — status is loaded
+    lazily on first use, so a slow/blocked tool check can't stall plugin startup.
+  - When `yt-dlp` is missing the search view shows a slim note pointing to
+    Settings → Dependencies (no install button); user actions are silent no-ops.
+- Requires app **0.9.124+** (`minAppVersion`) for `api.system.getDependency`.
+
 ## v1.3.0
 - Plugin now ships a **YouTube icon** (`manifest.icon` + the sidebar item icon),
   replacing the generic magnifying-glass / "Y" letter fallback in the sidebar and

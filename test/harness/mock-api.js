@@ -91,6 +91,21 @@ function makeApi(config) {
         }
         return { exitCode: 1, stdout: "", stderr: "" };
       },
+      // Host-owned dependency status. Derived from the same `exec` rules a test
+      // configures (a passing `--version`/`-version` rule => installed), so
+      // existing tool-presence setups drive getDependency without extra config.
+      getDependency: async (name) => {
+        const verArg = name === "ffmpeg" ? "-version" : "--version";
+        for (const rule of execRules) {
+          if (rule.match.cmd === name) {
+            const r = (typeof rule.result === "function" ? rule.result(name, [verArg]) : rule.result) || {};
+            if ((r.exitCode == null || r.exitCode === 0) && r.stdout) {
+              return { name, installed: true, version: (r.stdout.split("\n")[0] || "").trim(), origin: "system", latest: null };
+            }
+          }
+        }
+        return { name, installed: false, version: null, origin: null, latest: null };
+      },
     },
     network: {
       fetch: async (url) => {

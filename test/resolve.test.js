@@ -93,6 +93,9 @@ test("onGetQualities lists aac/mp3/flac when ffmpeg is present", async () => {
   const api = downloadApi({ ffmpeg: true });
   const plugin = loadPlugin();
   await plugin.activate(api);
+  // Tool status is loaded lazily from the host (not during activate); load it
+  // explicitly so ffmpeg is known before asking for qualities.
+  await plugin._loadToolStatus(api);
   const qualities = api._handlers["qual:youtube-download"]();
   assert.deepEqual(qualities.map((q) => q.value), ["aac", "mp3", "flac"]);
 });
