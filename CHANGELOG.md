@@ -1,5 +1,19 @@
 # Changelog
 
+## v1.5.0
+- **Browsable search.** The search view now requests **25 results** (was 7) so
+  you can scan and pick rather than trust the top hit. (The playback fallback
+  resolver keeps its small default — it only needs one duration match.)
+- **Artwork for external tracks.** `buildTrack` now carries each video's
+  thumbnail as `image_url`, so YouTube tracks (which have no library DB row) show
+  cover art in the queue panel and the now-playing bar.
+- **Cancellable search.** The Search button reads **Cancel** while a search is in
+  flight; clicking it (or pressing Enter) discards the in-flight result via a
+  generation token. (`yt-dlp` keeps running to completion — there's no kill
+  handle — but its output is dropped.)
+- **Download feedback.** Download actions now show an immediate "Downloading…"
+  toast; the host toasts completion/failure on top of that.
+
 ## v1.4.0
 - **Dependency handling moved to the host.** The plugin no longer detects tools,
   checks releases, or prompts to install — it only declares `binaryDependencies`
