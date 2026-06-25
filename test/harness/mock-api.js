@@ -67,7 +67,7 @@ function execMatches(entry, cmd, args) {
 
 function makeApi(config) {
   config = config || {};
-  const calls = { exec: [], log: [], setViewData: [], openUrl: [], playTrack: [], insertTracks: [], enqueue: [], requestAction: [] };
+  const calls = { exec: [], log: [], setViewData: [], openUrl: [], playTrack: [], insertTracks: [], enqueue: [], requestAction: [], showNotification: [] };
   const handlers = {};
   const storage = makeStorage(config.storage);
 
@@ -85,7 +85,10 @@ function makeApi(config) {
         calls.exec.push({ cmd, args });
         for (const rule of execRules) {
           if (execMatches(rule, cmd, args)) {
-            const r = typeof rule.result === "function" ? rule.result(cmd, args) : rule.result;
+            let r = typeof rule.result === "function" ? rule.result(cmd, args) : rule.result;
+            // Allow a rule.result to be (or return) a promise so tests can model
+            // a slow / in-flight subprocess; a pending promise keeps exec pending.
+            if (r && typeof r.then === "function") r = await r;
             return Object.assign({ exitCode: 0, stdout: "", stderr: "" }, r);
           }
         }
@@ -140,6 +143,7 @@ function makeApi(config) {
       onAction: (id, fn) => { handlers["action:" + id] = fn; },
       setViewData: (id, data) => { calls.setViewData.push({ id, data }); },
       requestAction: (action, payload) => { calls.requestAction.push({ action, payload }); },
+      showNotification: (message) => { calls.showNotification.push(message); },
     },
   };
 

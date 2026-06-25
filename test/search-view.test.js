@@ -246,6 +246,20 @@ test("youtube-download enqueues once per selected id with the youtube:// uri", a
   assert.equal(req.provider, "youtube-download");
   assert.equal(req.title, "Never Gonna Give You Up");
   assert.equal(req.artistName, "Rick Astley");
+  // The user gets immediate feedback that the download was queued.
+  assert.equal(api.calls.showNotification.length, 1, "shows a download notification");
+  assert.match(api.calls.showNotification[0], /Downloading 2 tracks/);
+});
+
+test("search view requests a larger result set than the fallback resolver", async () => {
+  const api = searchApi();
+  const plugin = loadPlugin();
+  await plugin.activate(api);
+  await api._handlers["action:youtube-search-submit"]({ query: "rick astley" });
+  const search = api.calls.exec.find((e) => e.args.some((a) => /^ytsearch\d+:/.test(a)));
+  assert.ok(search, "ran a ytsearch");
+  const arg = search.args.find((a) => /^ytsearch\d+:/.test(a));
+  assert.equal(arg.split(":")[0], "ytsearch25", "search view asks for 25 results");
 });
 
 test("actions ignore empty / unknown selections without throwing", async () => {
@@ -324,4 +338,38 @@ test("URI resolvers return null when yt-dlp is unavailable", async () => {
   await plugin.activate(api);
   assert.equal(await api._handlers["streamuri:youtube"]("dQw4w9WgXcQ"), null);
   assert.equal(await api._handlers["uri:youtube-download"]("youtube://dQw4w9WgXcQ", "aac"), null);
+});
+
+test("the Search button reads Cancel while in flight; a second submit cancels and discards the result", async () => {
+  let resolveSearch;
+  const api = baseApi({
+    exec: [
+      { match: { cmd: "yt-dlp", argsInclude: ["--version"] }, result: { exitCode: 0, stdout: "2025.01.01\n" } },
+      { match: { cmd: "ffmpeg", argsInclude: ["-version"] }, result: { exitCode: 0, stdout: "ffmpeg version 6.1\n" } },
+      // ytsearch hangs until the test resolves it — simulates an in-flight search.
+      { match: { cmd: "yt-dlp", argsInclude: ["ytsearch"] }, result: () => new Promise((res) => { resolveSearch = res; }) },
+    ],
+  });
+  const plugin = loadPlugin();
+  await plugin.activate(api);
+
+  // Kick off a search without awaiting (runYtSearch hangs on the pending exec),
+  // then flush microtasks so the searching=true re-render lands.
+  const inFlight = api._handlers["action:youtube-search-submit"]({ query: "rage" });
+  await new Promise((r) => setTimeout(r, 0));
+
+  let input = findNode(lastView(api, "youtube-search"), "search-input");
+  assert.equal(input.buttonLabel, "Cancel", "button reads Cancel while searching");
+  assert.ok(findNode(lastView(api, "youtube-search"), "loading"), "shows the searching spinner");
+
+  // A second submit while in flight is treated as Cancel.
+  await api._handlers["action:youtube-search-submit"]({ query: "rage" });
+  input = findNode(lastView(api, "youtube-search"), "search-input");
+  assert.equal(input.buttonLabel, "Search", "button reverts to Search after cancel");
+  assert.ok(!findNode(lastView(api, "youtube-search"), "loading"), "spinner cleared after cancel");
+
+  // The orphaned search now completes — its result must be discarded (no list).
+  resolveSearch({ exitCode: 0, stdout: "dQw4w9WgXcQ\t213\tCh\tArtist - Title\n" });
+  await inFlight;
+  assert.ok(!findNode(lastView(api, "youtube-search"), "track-row-list"), "cancelled result is discarded");
 });

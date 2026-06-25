@@ -10,6 +10,9 @@ var cacheMaxMb = 100;
 var searchQuery = "";
 var searchResults = null; // array of candidates, or null before first search
 var searching = false;
+// Bumped on every search start AND on cancel; an in-flight runYtSearch compares
+// its captured generation and discards its result if the value has moved on.
+var searchGen = 0;
 
 // Filenames currently being produced/consumed by an in-flight resolve. cleanupCache
 // never evicts these, so a parallel download cannot delete another's just-written file.
@@ -79,7 +82,11 @@ function buildTrack(c) {
     title: parsed.title || c.title || c.videoId,
     artist_name: parsed.artist || c.channel || null,
     duration_secs: c.durationSecs != null ? c.durationSecs : null,
-    path: "youtube://" + c.videoId
+    path: "youtube://" + c.videoId,
+    // Carry the video thumbnail so the queue panel and now-playing bar show
+    // artwork immediately, without a library image lookup (these are external
+    // tracks with no DB row). thumbnailUrl is hoisted (function declaration).
+    image_url: thumbnailUrl(c.videoId)
   };
 }
 
@@ -715,15 +722,31 @@ async function activate(api) {
   });
 
   api.ui.onAction("youtube-search-submit", async function(data) {
+    // While a search is in flight the button reads "Cancel" — a click/Enter then
+    // cancels: bump the generation (so the in-flight result is discarded) and
+    // return to the prior view. yt-dlp keeps running to completion (the plugin
+    // API has no kill handle), but its output is dropped by the gen check below.
+    if (searching) {
+      searchGen++;
+      searching = false;
+      renderSearchView(api);
+      return;
+    }
     searchQuery = data && typeof data.query === "string" ? data.query : "";
     if (!searchQuery.trim()) { searchResults = null; renderSearchView(api); return; }
     await ensureToolStatus(api);
     if (!ytDlpVersion) { renderSearchView(api); return; }
+    var gen = ++searchGen;
     searching = true;
     renderSearchView(api);
     try {
-      searchResults = await runYtSearch(api, searchQuery);
+      // 25 results for the browsable search view (the fallback resolver keeps
+      // its small default — it only needs enough to pick a best duration match).
+      var results = await runYtSearch(api, searchQuery, 25);
+      if (gen !== searchGen) return; // cancelled or superseded — discard
+      searchResults = results;
     } catch (e) {
+      if (gen !== searchGen) return; // cancelled — ignore the error too
       api.log("error", "Search failed: " + (e && e.message ? e.message : e), "youtube");
       searchResults = []; // renderSearchView will display "No results."
     }
@@ -782,16 +805,25 @@ async function activate(api) {
   api.ui.onAction("youtube-download", function(data) {
     var chosen = selectedResults(data);
     if (chosen.length === 0) return;
-    if (!ytDlpVersion) return;
-    for (var i = 0; i < chosen.length; i++) {
-      var t = buildTrack(chosen[i]);
+    if (!ytDlpVersion) {
+      api.ui.showNotification("yt-dlp isn't installed — can't download. See Settings → Dependencies.");
+      return;
+    }
+    var tracks = [];
+    for (var i = 0; i < chosen.length; i++) tracks.push(buildTrack(chosen[i]));
+    for (var j = 0; j < tracks.length; j++) {
       api.downloads.enqueue({
-        title: t.title,
-        artistName: t.artist_name,
-        uri: t.path,
+        title: tracks[j].title,
+        artistName: tracks[j].artist_name,
+        uri: tracks[j].path,
         provider: "youtube-download"
       });
     }
+    // Immediate feedback that the download was queued; the host toasts again on
+    // completion/failure (download-complete / download-error).
+    api.ui.showNotification(tracks.length === 1
+      ? "Downloading “" + tracks[0].title + "”…"
+      : "Downloading " + tracks.length + " tracks…");
   });
 
   renderSettings(api);
@@ -865,7 +897,7 @@ function renderSearchView(api) {
     placeholder: "Search YouTube...",
     action: "youtube-search-submit",
     value: searchQuery,
-    buttonLabel: "Search"
+    buttonLabel: searching ? "Cancel" : "Search"
   });
 
   if (searching) {
@@ -912,6 +944,7 @@ function deactivate() {
   searchQuery = "";
   searchResults = null;
   searching = false;
+  searchGen = 0;
 }
 
 return { activate: activate, deactivate: deactivate, _parseTrackTitle: parseTrackTitle, _formatDuration: formatDuration, _loadToolStatus: loadToolStatus };
