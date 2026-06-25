@@ -234,21 +234,25 @@ test("youtube-queue inserts selected tracks at the end of the queue", async () =
   assert.equal(rec.tracks[0].path, "youtube://dQw4w9WgXcQ");
 });
 
-test("youtube-download enqueues once per selected id with the youtube:// uri", async () => {
+test("youtube-download routes the selection through the host download modal", async () => {
   const api = searchApi();
   const plugin = loadPlugin();
   await plugin.activate(api);
   await api._handlers["action:youtube-search-submit"]({ query: "rick astley" });
   await api._handlers["action:youtube-download"]({ selectedIds: ["dQw4w9WgXcQ", "abcdefghijk"] });
-  assert.equal(api.calls.enqueue.length, 2);
-  const req = api.calls.enqueue[0];
-  assert.equal(req.uri, "youtube://dQw4w9WgXcQ");
-  assert.equal(req.provider, "youtube-download");
-  assert.equal(req.title, "Never Gonna Give You Up");
-  assert.equal(req.artistName, "Rick Astley");
-  // The user gets immediate feedback that the download was queued.
-  assert.equal(api.calls.showNotification.length, 1, "shows a download notification");
-  assert.match(api.calls.showNotification[0], /Downloading 2 tracks/);
+  // No direct enqueue — the modal owns destination/format selection + progress.
+  assert.equal(api.calls.enqueue.length, 0);
+  const reqs = api.calls.requestAction.filter((r) => r.action === "download-tracks");
+  assert.equal(reqs.length, 1, "requested the download modal once for the whole selection");
+  const p = reqs[0].payload;
+  assert.equal(p.providerId, "youtube:youtube-download");
+  assert.equal(p.providerName, "YouTube");
+  assert.equal(p.tracks.length, 2);
+  assert.equal(p.tracks[0].uri, "youtube://dQw4w9WgXcQ");
+  assert.equal(p.tracks[0].title, "Never Gonna Give You Up");
+  assert.equal(p.tracks[0].artist_name, "Rick Astley");
+  assert.equal(p.tracks[0].durationSecs, 213);
+  assert.equal(p.tracks[1].uri, "youtube://abcdefghijk");
 });
 
 test("search view requests a larger result set than the fallback resolver", async () => {
@@ -271,6 +275,11 @@ test("actions ignore empty / unknown selections without throwing", async () => {
   await api._handlers["action:youtube-download"]({ selectedIds: ["zzzzzzzzzzz"] });
   assert.equal(api.calls.playTrack.length, 0);
   assert.equal(api.calls.enqueue.length, 0);
+  assert.equal(
+    api.calls.requestAction.filter((r) => r.action === "download-tracks").length,
+    0,
+    "no download modal requested for an unknown selection",
+  );
 });
 
 function resolverApi() {
@@ -338,6 +347,79 @@ test("URI resolvers return null when yt-dlp is unavailable", async () => {
   await plugin.activate(api);
   assert.equal(await api._handlers["streamuri:youtube"]("dQw4w9WgXcQ"), null);
   assert.equal(await api._handlers["uri:youtube-download"]("youtube://dQw4w9WgXcQ", "aac"), null);
+});
+
+// The host's multi-track / batch download flow resolves each selected track via
+// interactive-resolve, passing the track's youtube://<id> uri as the matchId.
+// It must download that EXACT id, never re-search by metadata.
+test("interactive resolve downloads the exact id from a youtube:// uri without searching", async () => {
+  const api = resolverApi();
+  const plugin = loadPlugin();
+  await plugin.activate(api);
+  const res = await api._handlers["iresolve:youtube-download"]("youtube://dQw4w9WgXcQ", "aac");
+  assert.ok(res && res.url && res.url.startsWith("file://"), "returns a file url");
+  const downloaded = api.calls.exec.some((e) => e.args.join(" ").includes("dQw4w9WgXcQ"));
+  assert.equal(downloaded, true, "downloaded the exact id");
+  const searched = api.calls.exec.some((e) => e.args.join(" ").includes("ytsearch"));
+  assert.equal(searched, false, "must not search — resolves by exact id");
+});
+
+// The manual-search picker passes a bare 11-char video id as the matchId.
+test("interactive resolve accepts a bare video id (manual-search pick)", async () => {
+  const api = resolverApi();
+  const plugin = loadPlugin();
+  await plugin.activate(api);
+  const res = await api._handlers["iresolve:youtube-download"]("dQw4w9WgXcQ", "aac");
+  assert.ok(res && res.url && res.url.startsWith("file://"), "returns a file url");
+  const searched = api.calls.exec.some((e) => e.args.join(" ").includes("ytsearch"));
+  assert.equal(searched, false, "must not search — resolves by exact id");
+});
+
+// Throw (not return null) on failure so the host marks the track errored instead
+// of crashing on a null `resolved.url`.
+test("interactive resolve throws on an invalid match id", async () => {
+  const api = resolverApi();
+  const plugin = loadPlugin();
+  await plugin.activate(api);
+  await assert.rejects(() => api._handlers["iresolve:youtube-download"]("not-a-valid-id!!", "aac"));
+});
+
+test("interactive resolve throws when yt-dlp is unavailable", async () => {
+  const api = makeApi({
+    storage: { kv: { cacheMaxMb: 100 } },
+    exec: [
+      { match: { cmd: "yt-dlp", argsInclude: ["--version"] }, result: { exitCode: 1, stderr: "not found" } },
+    ],
+  });
+  const plugin = loadPlugin();
+  await plugin.activate(api);
+  await assert.rejects(() => api._handlers["iresolve:youtube-download"]("youtube://dQw4w9WgXcQ", "aac"));
+});
+
+test("interactive search returns candidates carrying the exact video id", async () => {
+  const api = searchApi();
+  const plugin = loadPlugin();
+  await plugin.activate(api);
+  const results = await api._handlers["isearch:youtube-download"]("rick astley", 10);
+  assert.equal(results.length, 2);
+  assert.equal(results[0].id, "dQw4w9WgXcQ", "id is the bare video id (resolved exactly later)");
+  assert.equal(results[0].title, "Never Gonna Give You Up");
+  assert.equal(results[0].artistName, "Rick Astley");
+  assert.equal(results[0].durationSecs, 213);
+  assert.match(results[0].coverUrl, /dQw4w9WgXcQ/);
+});
+
+test("interactive search returns [] when yt-dlp is unavailable", async () => {
+  const api = makeApi({
+    storage: { kv: { cacheMaxMb: 100 } },
+    exec: [
+      { match: { cmd: "yt-dlp", argsInclude: ["--version"] }, result: { exitCode: 1, stderr: "not found" } },
+    ],
+  });
+  const plugin = loadPlugin();
+  await plugin.activate(api);
+  const results = await api._handlers["isearch:youtube-download"]("rick astley", 10);
+  assert.deepEqual(results, []);
 });
 
 test("the Search button reads Cancel while in flight; a second submit cancels and discards the result", async () => {

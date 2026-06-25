@@ -137,6 +137,8 @@ function makeApi(config) {
       onResolveByUri: (id, fn) => { handlers["uri:" + id] = fn; },
       onResolveByMetadata: (id, fn) => { handlers["meta:" + id] = fn; },
       onGetQualities: (id, fn) => { handlers["qual:" + id] = fn; },
+      onInteractiveSearch: (id, fn) => { handlers["isearch:" + id] = fn; },
+      onInteractiveResolve: (id, fn) => { handlers["iresolve:" + id] = fn; },
       enqueue: async (request) => { calls.enqueue.push(request); return calls.enqueue.length; },
     },
     ui: {

@@ -712,6 +712,48 @@ async function activate(api) {
     }
   });
 
+  // Interactive search — powers the host download modal's manual-search picker.
+  // Reuses the same yt-dlp search the sidebar view uses; results carry the exact
+  // video id so the matching resolve downloads precisely what the user picked.
+  api.downloads.onInteractiveSearch("youtube-download", async function(query, limit) {
+    await ensureToolStatus(api);
+    if (!ytDlpVersion) return [];
+    var candidates = await runYtSearch(api, query, limit || 10);
+    var out = [];
+    for (var i = 0; i < candidates.length; i++) {
+      var c = candidates[i];
+      var parsed = parseTrackTitle(c.title, c.channel);
+      out.push({
+        id: c.videoId, // bare 11-char id — resolved by exact id below, never re-searched
+        title: parsed.title || c.title || c.videoId,
+        artistName: parsed.artist || c.channel || undefined,
+        durationSecs: c.durationSecs != null ? c.durationSecs : undefined,
+        coverUrl: thumbnailUrl(c.videoId)
+      });
+    }
+    return out;
+  });
+
+  // Interactive resolve — used by BOTH the multi-track/batch download flow (the
+  // host passes each selected track's youtube://<id> uri as the matchId) and the
+  // manual-search picker (a bare video id). Either way we download that EXACT
+  // video by id and never re-search by metadata, so the user gets precisely the
+  // results they selected. Throws on failure so the host marks the track errored
+  // (a null return would crash the host's `resolved.url` read).
+  api.downloads.onInteractiveResolve("youtube-download", async function(matchId, format) {
+    await ensureToolStatus(api);
+    if (!ytDlpVersion) throw new Error("yt-dlp not available");
+    // matchId may be a bare 11-char video id (from interactive search) or a full
+    // youtube://<id> uri (from the batch/confirmed download flow). Normalize to the id.
+    var videoId = parseYoutubeUri(matchId) || matchId;
+    if (!VIDEO_ID_RE.test(videoId)) throw new Error("Invalid YouTube match id: " + matchId);
+    var result = await resolveSourceWith(api, function() { return downloadById(api, videoId); }, function(src) {
+      return convertForFormat(api, src, format, src.videoTitle || videoId, null, null);
+    });
+    if (!result) throw new Error("Failed to download YouTube video " + videoId);
+    return result;
+  });
+
   api.ui.onAction("youtube-cache-size", async function(data) {
     var val = parseInt(data, 10);
     if (isNaN(val) || val < 0) return;
@@ -809,21 +851,28 @@ async function activate(api) {
       api.ui.showNotification("yt-dlp isn't installed — can't download. See Settings → Dependencies.");
       return;
     }
+    // Route through the host's standard download modal instead of enqueueing
+    // directly, so the user gets a say: destination + format/quality (AAC/MP3/
+    // FLAC via onGetQualities) selection, and per-track progress + error
+    // reporting. A single selection opens the single-track flow (configured by
+    // its youtube:// uri); multiple opens the batch flow. The providerId is
+    // namespaced "<pluginId>:<providerId>" — how the host keys download providers.
     var tracks = [];
-    for (var i = 0; i < chosen.length; i++) tracks.push(buildTrack(chosen[i]));
-    for (var j = 0; j < tracks.length; j++) {
-      api.downloads.enqueue({
-        title: tracks[j].title,
-        artistName: tracks[j].artist_name,
-        uri: tracks[j].path,
-        provider: "youtube-download"
+    for (var i = 0; i < chosen.length; i++) {
+      var t = buildTrack(chosen[i]);
+      tracks.push({
+        title: t.title,
+        artist_name: t.artist_name,
+        album_title: null,
+        uri: t.path, // youtube://<videoId>
+        durationSecs: t.duration_secs
       });
     }
-    // Immediate feedback that the download was queued; the host toasts again on
-    // completion/failure (download-complete / download-error).
-    api.ui.showNotification(tracks.length === 1
-      ? "Downloading “" + tracks[0].title + "”…"
-      : "Downloading " + tracks.length + " tracks…");
+    api.ui.requestAction("download-tracks", {
+      providerId: "youtube:youtube-download",
+      providerName: "YouTube",
+      tracks: tracks
+    });
   });
 
   renderSettings(api);

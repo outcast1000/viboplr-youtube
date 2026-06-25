@@ -1,5 +1,21 @@
 # Changelog
 
+## v1.6.0
+- **Downloads go through the host's download modal.** Selecting tracks in the
+  search view now opens the host's standard download flow (via
+  `api.ui.requestAction("download-tracks", …)`) instead of enqueueing silently.
+  The user picks a destination and format/quality (AAC/MP3/FLAC), and gets
+  per-track progress + error reporting. A single selection opens the single-track
+  flow; multiple opens the batch flow.
+- **Interactive download provider.** The `youtube-download` provider now
+  contributes `onInteractiveSearch` (powers the modal's manual-search picker) and
+  `onInteractiveResolve` (used by both the batch flow and the manual picker).
+  Both resolve the **exact** video the user picked — by bare video id or
+  `youtube://<id>` uri — and never re-search by metadata.
+  - `onInteractiveResolve` **throws** (rather than returning `null`) on failure or
+    a missing `yt-dlp`, so the host marks the track errored instead of crashing on
+    a null `resolved.url`.
+
 ## v1.5.0
 - **Browsable search.** The search view now requests **25 results** (was 7) so
   you can scan and pick rather than trust the top hit. (The playback fallback
